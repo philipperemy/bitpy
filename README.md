@@ -2,12 +2,12 @@
 
 A tiny library made by traders for traders in python.
 
-Supports:
-- Websocket - Public + Private
+It supports:
+- Websocket API - Public + Private
    - Tickers
    - Order Books (reconstruction)
    - Order Status / Positions / Executions (private feed)
-- REST
+- REST API
    - Positions
    - Order Books
    - Open Orders
@@ -19,8 +19,8 @@ Supports:
    - Mass Cancel Orders
    - Get Balances
 - Unified Interface: REST + Websocket.
-   - Order books fetched from the websocket if available otherwise from the REST.
-   - Tickers fetched from the websocket if available otherwise from the REST.
+   - Order books fetched from the websocket if available otherwise from the REST
+   - Tickers fetched from the websocket if available otherwise from the REST
 
 ### Installation
 
