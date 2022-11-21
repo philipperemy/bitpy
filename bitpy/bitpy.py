@@ -212,8 +212,8 @@ class ByBit:
             self,
             symbol: str,
             side: str,
-            price: Optional[float],
             size: float,
+            price: Optional[float] = None,
             type: str = 'limit',
             reduce_only: bool = False,
             ioc: bool = False,
@@ -727,9 +727,13 @@ class ByBitRest:
             client_id: Optional[str] = None,
             **kwargs
     ) -> dict:
-        if type != 'limit':
+        type_ = type.lower()
+        assert type_ in {'market', 'limit'}
+        if type_ == 'market':
             price = None
-        assert side in ['buy', 'sell']
+        elif type_ == 'limit' and price is None:
+            raise ValueError('Price should be defined for type=Limit. Maybe you meant type=Market?')
+        assert side in {'buy', 'sell'}
         price = self._round(symbol, price=price)
         size = self._round(symbol, size=size)
         tif = None
@@ -737,9 +741,10 @@ class ByBitRest:
             tif = TimeInForce.IOC
         elif post_only:
             tif = TimeInForce.POS
+        # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-dv_placeorder
         params = {
             'symbol': symbol,
-            'orderType': 'Limit',
+            'orderType': type_.title(),
             'side': side.title(),
             'price': price,
             'category': self.category,
