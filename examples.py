@@ -23,7 +23,7 @@ CREDENTIALS_FILE = credentials_dir / 'bybit.json'
 
 def main():
     symbol = 'BTCUSDT'
-    bybit = ByBit(credentials=CREDENTIALS_FILE, subscribe_to_tickers=True)
+    bybit = ByBit(credentials=CREDENTIALS_FILE)
 
     logging.info(bybit.get_balances())
 
