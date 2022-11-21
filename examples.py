@@ -29,6 +29,8 @@ def main():
 
     bybit.cancel_all_orders()
 
+    bybit.get_executions()
+
     ticker = bybit.get_tickers(symbol=symbol)
     bid = ticker['bidPrice']
 

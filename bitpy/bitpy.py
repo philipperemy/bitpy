@@ -244,6 +244,17 @@ class ByBit:
     def get_balances(self, **kwargs):
         return self.rest.get_balances(**kwargs)
 
+    def get_executions(
+            self,
+            symbol: Optional[str] = None,
+            order_id: Optional[str] = None,
+            client_id: Optional[str] = None,
+            **kwargs
+    ) -> List[dict]:
+        if self.private_feed is not None:
+            return self.private_feed.execution_handler.get_executions(symbol, order_id, client_id)
+        return self.rest.get_executions(symbol, order_id, client_id, **kwargs)
+
 
 class TimeInForce(Enum):
     GTC = 'GoodTillCancel'
@@ -278,6 +289,24 @@ class ByBitExecutions:
     def __init__(self):
         self.executions = {}
 
+    def get_executions(
+            self,
+            symbol: Optional[str] = None,
+            order_id: Optional[str] = None,
+            client_id: Optional[str] = None
+    ) -> List[dict]:
+        if symbol is not None:
+            executions = self.executions.get(symbol)
+            if executions is None:
+                executions = []
+        else:
+            executions = sum(list(self.executions.values()), [])
+        if order_id is not None:
+            executions = [e for e in executions if e['orderId'] == order_id]
+        if client_id is not None:
+            executions = [e for e in executions if e['orderLinkId'] == client_id]
+        return executions
+
     def on_message(self, msg: dict):
         data = msg['data']
         data = _result_to_float_values(data)
@@ -289,7 +318,10 @@ class ByBitExecutions:
             # 'execTime': 1668919809762, 'feeRate': '0.000600', 'execValue': '0.33020000',
             # 'lastLiquidityInd': 'TAKER', 'orderPrice': '0.31370000', 'orderType': 'Market',
             # 'stopOrderType': 'UNKNOWN', 'blockTradeId': ''}
-            self.executions[result['symbol']] = result
+            symbol = result['symbol']
+            if symbol not in self.executions:
+                self.executions[symbol] = []
+            self.executions[symbol].append(result)
 
 
 class ByBitPositions:
@@ -780,6 +812,21 @@ class ByBitRest:
 
     def fetch_perp_markets(self, **kwargs) -> List[Dict]:
         return [a for a in self._get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
+
+    def get_executions(
+            self,
+            symbol: Optional[str] = None,
+            order_id: Optional[str] = None,
+            client_id: Optional[str] = None,
+            **kwargs):
+        params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
+        params.update(kwargs)
+        return self._paginate(
+            self._get,
+            unique_key='execId',
+            path='/unified/v3/private/execution/list',
+            params=params
+        )
 
 
 class ByBitStream:
