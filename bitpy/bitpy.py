@@ -156,7 +156,11 @@ class ByBit:
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         if self.private_feed is not None:
             positions = self.private_feed.position_handler.positions
-            return [positions.get(symbol)] if symbol is not None else list(positions.values())
+            if symbol is not None:
+                symbol_position = positions.get(symbol)
+                return [] if symbol_position is None else [symbol_position]
+            else:
+                list(positions.values())
         return self.rest.get_positions(symbol, **kwargs)
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None) -> dict:
