@@ -280,6 +280,7 @@ class ByBitExecutions:
 
     def on_message(self, msg: dict):
         data = msg['data']
+        data = _result_to_float_values(data)
         for result in data['result']:
             # {'symbol': 'ADAUSDT', 'side': 'Sell', 'orderId': 'a2c60728-8f5c-46e0-920b-e32952014448',
             # 'execId': '44aed711-5a9e-5d8c-bcdf-21ec3746065b', 'orderLinkId': '',
@@ -297,6 +298,7 @@ class ByBitPositions:
 
     def on_message(self, msg: dict):
         data = msg['data']
+        data = _result_to_float_values(data)
         for result in data['result']:
             # {'positionIdx': 0, 'riskId': 1, 'symbol': 'BTCUSDT', 'side': 'None', 'size': '0.0000',
             # 'entryPrice': '0.00000000', 'leverage': '10', 'markPrice': '16851.50000000',
