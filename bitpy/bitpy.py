@@ -321,6 +321,7 @@ class ByBitOrderStatuses:
 
     def on_message(self, msg: dict):
         data = msg['data']
+        data = _result_to_float_values(data)
         for result in data['result']:
             # {'orderId': 'e2b14fef-0332-4240-a884-8000cdae0c1e', 'orderLinkId': '', 'symbol': 'BTCUSDT',
             # 'side': 'Buy', 'orderType': 'Limit', 'price': '10000.00000000', 'qty': '0.0100',
@@ -429,10 +430,10 @@ class ByBitRest:
         self._api_secret = api_secret
         self._recv_window = str(5000)
         self._symbols = self.query_symbols_v2()
-        self._step_sizes = {s['name']: float(s['lot_size_filter']['qty_step']) for s in self._symbols}
-        self._min_quantities = {s['name']: float(s['lot_size_filter']['min_trading_qty']) for s in self._symbols}
+        self.step_sizes = {s['name']: float(s['lot_size_filter']['qty_step']) for s in self._symbols}
+        self.min_quantities = {s['name']: float(s['lot_size_filter']['min_trading_qty']) for s in self._symbols}
         # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-ipratelimits
-        self._tick_prices = {s['name']: float(s['price_filter']['tick_size']) for s in self._symbols}
+        self.tick_prices = {s['name']: float(s['price_filter']['tick_size']) for s in self._symbols}
         # Why? Modify requires the symbol but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
@@ -563,11 +564,11 @@ class ByBitRest:
     def _round(self, symbol: str, price: Optional[float] = None, size: Optional[float] = None) -> float:
         assert price is None or size is None
         if price is not None:
-            return round(_round_tick(price, self._tick_prices[symbol]), 8)
+            return round(_round_tick(price, self.tick_prices[symbol]), 8)
         if size is not None:
-            size_ = _round_tick(size, self._step_sizes[symbol])
-            if size_ < self._min_quantities[symbol]:
-                size_ = self._min_quantities[symbol]
+            size_ = _round_tick(size, self.step_sizes[symbol])
+            if size_ < self.min_quantities[symbol]:
+                size_ = self.min_quantities[symbol]
             return round(size_, 8)
 
     def cancel_order(
