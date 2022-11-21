@@ -460,6 +460,10 @@ class ByBitRest:
         # self.throttler = ByBitThrottler()
         self._session = Session()
         self._base_url = base_url
+        if api_key is None:
+            api_key = ''
+        if api_secret is None:
+            api_secret = ''
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window = str(5000)
