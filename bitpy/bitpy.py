@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from queue import Queue, Empty
@@ -14,7 +14,6 @@ from typing import Union
 from urllib.parse import urlencode
 
 import numpy as np
-import pandas as pd
 import requests
 import websocket
 from requests import Session, Response
@@ -22,8 +21,7 @@ from requests import Session, Response
 logger = logging.getLogger(__name__)
 
 
-# https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#order-order
-# https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-websocket
+# https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
 
 def _result_to_float_values(d: Union[List, dict]) -> Union[dict, List[float]]:
     res = {}
@@ -36,7 +34,10 @@ def _result_to_float_values(d: Union[List, dict]) -> Union[dict, List[float]]:
             res[k] = _result_to_float_values(v)
         else:
             try:
-                res[k] = float(v)
+                if v is None:
+                    res[k] = v
+                else:
+                    res[k] = float(v)
             except ValueError:
                 res[k] = v
     return res
@@ -145,11 +146,12 @@ class ByBit:
                 subscribe_to_order_books=self.subscribe_to_order_books,
                 subscribe_to_tickers=self.subscribe_to_tickers,
                 orderbook_depth=self.orderbook_depth,
-                private=False, background=True
+                private=False, background=True,
+                rest_api=self.rest
             )
         self.private_feed = None
         if subscribe_to_private_feed:
-            self.private_feed = ByBitStream(self.credentials, private=True, background=True)
+            self.private_feed = ByBitStream(self.credentials, private=True, background=True, rest_api=self.rest)
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         if self.private_feed is not None:
@@ -176,7 +178,10 @@ class ByBit:
 
     def get_tickers(self, symbol: Optional[str] = None, **kwargs):
         if self.subscribe_to_tickers:
-            tickers = self.private_feed.ticker_handler.tickers
+            tickers = self.public_feed.ticker_handler.tickers
+            for t in tickers.values():
+                t['bidPrice'] = t['bid1Price']
+                t['askPrice'] = t['ask1Price']
             return tickers.get(symbol) if symbol is not None else tickers
         return self.rest.get_markets(symbol, **kwargs)
 
@@ -190,12 +195,6 @@ class ByBit:
             return self.private_feed.order_status_handler.get_order_status(order_id=order_id, client_id=client_id)
         results = self.rest.get_orders(order_id=order_id, client_id=client_id, **kwargs)
         return results[0] if len(results) > 0 else None
-
-    def get_order_history(self, start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
-        start_time = int(start_date.replace(tzinfo=timezone.utc).timestamp() * 1000)
-        end_time = int(end_date.replace(tzinfo=timezone.utc).timestamp() * 1000)
-        results = self.rest.get_order_history(start_time=start_time, end_time=end_time)
-        return pd.DataFrame(results)
 
     def modify_order(
             self,
@@ -352,6 +351,7 @@ class ByBitTickers:
     def on_message(self, msg: dict):
         data = msg['data']
         symbol = data['symbol']
+        data = _result_to_float_values(data)
         if symbol not in self.tickers or msg['type'] == 'snapshot':
             self.tickers[symbol] = data
         else:
@@ -406,7 +406,7 @@ class ByBitOrderBooks:
                         del self.books[symbol][key[1]][price]
                     else:
                         self.books[symbol][key[1]][price] = value
-        self.books[symbol]['ts'] = datetime.utcfromtimestamp(timestamp / 1e3)
+        self.books[symbol]['ts'] = timestamp  # datetime.utcfromtimestamp(timestamp / 1e3)
         self.books[symbol]['update_id'] = data['u']
 
 
@@ -452,9 +452,9 @@ class ByBitRest:
         )
 
     @staticmethod
-    def _post_processing(resp: Any) -> Any:
+    def _post_processing(resp: Any, pagination: bool = False) -> Any:
         result = resp
-        if 'list' in resp:
+        if not pagination and 'list' in resp:
             result = resp['list']
         if isinstance(result, list):
             result = [_result_to_float_values(r) for r in result]
@@ -464,13 +464,13 @@ class ByBitRest:
             result = _result_to_float_values(result)
         return result
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
-        return self._post_processing(self._request('GET', path, params=params))
+        return self._post_processing(self._request('GET', path, params=params), pagination=pagination)
 
-    def _post(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _post(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
-        return self._post_processing(self._request('POST', path, params=params))
+        return self._post_processing(self._request('POST', path, params=params), pagination=pagination)
 
     def _sign_request(self, timestamp: str, params: str) -> str:
         payload = str(params)
@@ -597,7 +597,7 @@ class ByBitRest:
                 depth = 1
         params = {'category': self.category, 'symbol': symbol, 'limit': depth}
         params.update(kwargs)
-        ob = self._get(f'/derivatives/v3/public/order-book/L2', params)
+        ob = self._get('/derivatives/v3/public/order-book/L2', params)
         ob['bids'] = list(reversed([[float(t[0]), float(t[1])] for t in ob['b']]))
         ob['asks'] = [[float(t[0]), float(t[1])] for t in ob['a']]
         del ob['a']
@@ -726,20 +726,12 @@ class ByBitRest:
     def get_order_history(
             self,
             symbol: Optional[str] = None,
-            side: Optional[str] = None,
-            order_type: Optional[str] = None,
-            start_time: Optional[float] = None,
-            end_time: Optional[float] = None,
             **kwargs
     ) -> List[dict]:
         path = '/unified/v3/private/order/list'
         params = {
             'category': self.category,
             'symbol': symbol,
-            'side': side,
-            'orderType': order_type,
-            'start_time': start_time,
-            'end_time': end_time,
         }
         params.update(kwargs)
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
@@ -759,7 +751,7 @@ class ByBitRest:
                 past_cursors.add(cursor)
             else:
                 break
-            results = call(path=path, params=params)
+            results = call(path=path, params=params, pagination=True)
             if len(results) == 0:
                 break
             cursor = results['nextPageCursor']
@@ -797,8 +789,10 @@ class ByBitStream:
             orderbook_depth: int = 25,
             private: bool = False,
             background: bool = False,
-            print_stats_every: int = 600
+            print_stats_every: int = 600,
+            rest_api: Optional[ByBitRest] = None
     ):
+        self.rest_api = rest_api
         self.background = background
         self.private_topics = [
             'user.order.unifiedAccount',
@@ -934,19 +928,23 @@ class ByBitStream:
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_close(ws):
-        logger.warning(f'WEBSOCKET: feed closed.')
+        logger.warning('WEBSOCKET: feed closed.')
 
     # noinspection PyUnusedLocal
     def _on_open(self, ws):
-        logger.info(f'WEBSOCKET: open feed.')
+        logger.info('WEBSOCKET: open feed.')
         topics = []
         if self.private:
-            logger.info(f'WEBSOCKET: auth.')
+            logger.info('WEBSOCKET: auth.')
             self.send_auth(ws)
             topics = self.private_topics
         else:
-            order_book_topics = [f'orderbook.{self.orderbook_depth}.{p}' for p in PERP_LIST]
-            ticker_topics = [f'tickers.{p}' for p in PERP_LIST]
+            if self.rest_api is not None:
+                perp_list = [a['symbol'] for a in self.rest_api.fetch_perp_markets()]
+            else:
+                perp_list = PERP_LIST
+            order_book_topics = [f'orderbook.{self.orderbook_depth}.{p}' for p in perp_list]
+            ticker_topics = [f'tickers.{p}' for p in perp_list]
             if self.subscribe_to_tickers:
                 logger.info('Subscribe to order books.')
                 topics.extend(ticker_topics)
@@ -959,7 +957,7 @@ class ByBitStream:
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_pong(*data):
-        logger.debug(f'WEBSOCKET: pong received.')
+        logger.debug('WEBSOCKET: pong received.')
 
     # noinspection PyUnusedLocal
     @staticmethod

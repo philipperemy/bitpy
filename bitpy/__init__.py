@@ -1,1 +1,1 @@
-from bitpy.bitpy import *
+from bitpy.bitpy import *  # noqa

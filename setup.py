@@ -2,12 +2,11 @@ from setuptools import setup, find_packages
 
 setup(
     name='bitpy',
-    version='1.0',
+    version='1.1',
     description='BitPy',
     author='Philippe Remy',
-    requires=[
+    install_requires=[
         'numpy',
-        'pandas',
         'websocket-client',
         'requests'
     ],
