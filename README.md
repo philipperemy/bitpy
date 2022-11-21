@@ -2,6 +2,47 @@
 
 A tiny library made by traders for traders in python.
 
+Supports:
+- Websocket - Public + Private
+   - Tickers
+   - Order Books (reconstruction)
+   - Order Status / Positions / Executions (private feed)
+- REST
+   - Positions
+   - Order Books
+   - Open Orders
+   - Orders
+   - Tickers
+   - New Order
+   - Replace Order
+   - Cancel Order
+   - Mass Cancel Orders
+   - Get Balances
+- Unified Interface: REST + Websocket.
+   - Order books fetched from the websocket if available otherwise from the REST.
+   - Tickers fetched from the websocket if available otherwise from the REST.
+
+### Installation
+
+*Via PyPI*
+
+```
+pip install bitpy
+```
+
+### Usage
+
+The example covers:
+- Authenticate to ByBit Unified Account V3 API.
+- Log the available balance / equity.
+- Cancel all open orders.
+- Send new order BUY 0.01 BTCUSDT @ BEST_BID * 0.95.
+- Fetch open orders.
+- Replace this order 0.02 @ BEST_BID * 0.97.
+- Cancel this order.
+- Fetch positions.
+- Fetch order info.
+
 ```python
 symbol = 'BTCUSDT'
 bybit = ByBit(credentials=CREDENTIALS_FILE)
