@@ -2,7 +2,8 @@
 
 A tiny library made by traders for traders in python.
 
-It supports:
+### Scope
+
 - Websocket API - Public + Private
    - Tickers
    - Order Books (reconstruction)
@@ -21,6 +22,8 @@ It supports:
 - Unified Interface: REST + Websocket.
    - Order books fetched from the websocket if available otherwise from the REST
    - Tickers fetched from the websocket if available otherwise from the REST
+
+It has been tested on perpetuals (linear), not on options.
 
 ### Installation
 
