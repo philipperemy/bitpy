@@ -150,7 +150,7 @@ class ByBit:
                 rest_api=self.rest
             )
         self.private_feed = None
-        if subscribe_to_private_feed:
+        if subscribe_to_private_feed and self.credentials is not None:
             self.private_feed = ByBitStream(self.credentials, private=True, background=True, rest_api=self.rest)
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
