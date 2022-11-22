@@ -22,6 +22,288 @@ from urllib3 import HTTPSConnectionPool
 logger = logging.getLogger(__name__)
 
 
+class InsufficientFunds(Exception):
+    pass
+
+
+class BadRequest(Exception):
+    pass
+
+
+class InvalidOrder(Exception):
+    pass
+
+
+class AuthenticationError(Exception):
+    pass
+
+
+class ExchangeError(Exception):
+    pass
+
+
+class InvalidNonce(Exception):
+    pass
+
+
+class OrderNotFound(Exception):
+    pass
+
+
+class RateLimitExceeded(Exception):
+    pass
+
+
+class PermissionDenied(Exception):
+    pass
+
+
+class ExceptionMapper:
+    # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#110023
+    # https://github.com/ccxt/ccxt/blob/master/python/ccxt/bybit.py
+    exception_map = {
+        '-10009': BadRequest,  # {"ret_code":-10009,"ret_msg":"Invalid period!","result":null,"token":null}
+        '-1004': BadRequest,
+        # {"ret_code":-1004,"ret_msg":"Missing required parameter \u0027symbol\u0027",
+        # "ext_code":null,"ext_info":null,"result":null}
+        '-1021': BadRequest,
+        # {"ret_code":-1021,"ret_msg":"Timestamp for self request is outside of the
+        # recvWindow.","ext_code":null,"ext_info":null,"result":null}
+        '-1103': BadRequest,  # An unknown parameter was sent.
+        '-1140': InvalidOrder,
+        # {"ret_code":-1140,"ret_msg":"Transaction amount lower than the minimum.",
+        # "result":{},"ext_code":"","ext_info":null,"time_now":"1659204910.248576"}
+        '-1197': InvalidOrder,
+        # {"ret_code":-1197,"ret_msg":"Your order quantity to buy is too large. The
+        # filled price may deviate significantly from the market price. Please try again",
+        # "result":{},"ext_code":"","ext_info":null,"time_now":"1659204531.979680"}
+        '-2013': InvalidOrder,
+        # {"ret_code":-2013,"ret_msg":"Order does not exist.","ext_code":null,"ext_info":null,"result":null}
+        '-2015': AuthenticationError,  # Invalid API-key, IP, or permissions for action.
+        '-6017': BadRequest,  # Repayment amount has exceeded the total liability
+        '-6025': BadRequest,  # Amount to borrow cannot be lower than the min. amount to borrow(per transaction)
+        '-6029': BadRequest,  # Amount to borrow has exceeded the user's estimated max amount to borrow
+        '5004': ExchangeError,
+        # {"retCode":5004,"retMsg":"Server Timeout","result":null,"retExtInfo":{},"time":1667577060106}
+        '7001': BadRequest,  # {"retCode":7001,"retMsg":"request params type error"}
+        '10001': BadRequest,  # parameter error
+        '10002': InvalidNonce,  # request expired, check your timestamp and recv_window
+        '10003': AuthenticationError,  # Invalid apikey
+        '10004': AuthenticationError,  # invalid sign
+        '10005': PermissionDenied,  # permission denied for current apikey
+        '10006': RateLimitExceeded,  # too many requests
+        '10007': AuthenticationError,  # api_key not found in your request parameters
+        '10010': PermissionDenied,  # request ip mismatch
+        '10016': ExchangeError,  # {"retCode":10016,"retMsg":"System error. Please try again later."}
+        '10017': BadRequest,  # request path not found or request method is invalid
+        '10018': RateLimitExceeded,  # exceed ip rate limit
+        '10020': PermissionDenied,
+        # {"retCode":10020,"retMsg":"your account is not a unified margin account,
+        # please update your account","result":null,"retExtInfo":null,"time":1664783731123}
+        '12201': BadRequest,
+        # {"retCode":12201,"retMsg":"Invalid orderCategory parameter.","result":{},
+        # "retExtInfo":null,"time":1666699391220}
+        '131001': InsufficientFunds,
+        # {"retCode":131001,"retMsg":"the available balance is not sufficient to cover
+        # the handling fee","result":{},"retExtInfo":{},"time":1666892821245}
+        '20001': OrderNotFound,  # Order not exists
+        '20003': InvalidOrder,  # missing parameter side
+        '20004': InvalidOrder,  # invalid parameter side
+        '20005': InvalidOrder,  # missing parameter symbol
+        '20006': InvalidOrder,  # invalid parameter symbol
+        '20007': InvalidOrder,  # missing parameter order_type
+        '20008': InvalidOrder,  # invalid parameter order_type
+        '20009': InvalidOrder,  # missing parameter qty
+        '20010': InvalidOrder,  # qty must be greater than 0
+        '20011': InvalidOrder,  # qty must be an integer
+        '20012': InvalidOrder,  # qty must be greater than zero and less than 1 million
+        '20013': InvalidOrder,  # missing parameter price
+        '20014': InvalidOrder,  # price must be greater than 0
+        '20015': InvalidOrder,  # missing parameter time_in_force
+        '20016': InvalidOrder,  # invalid value for parameter time_in_force
+        '20017': InvalidOrder,  # missing parameter order_id
+        '20018': InvalidOrder,  # invalid date format
+        '20019': InvalidOrder,  # missing parameter stop_px
+        '20020': InvalidOrder,  # missing parameter base_price
+        '20021': InvalidOrder,  # missing parameter stop_order_id
+        '20022': BadRequest,  # missing parameter leverage
+        '20023': BadRequest,  # leverage must be a number
+        '20031': BadRequest,  # leverage must be greater than zero
+        '20070': BadRequest,  # missing parameter margin
+        '20071': BadRequest,  # margin must be greater than zero
+        '20084': BadRequest,  # order_id or order_link_id is required
+        '30001': BadRequest,  # order_link_id is repeated
+        '30003': InvalidOrder,  # qty must be more than the minimum allowed
+        '30004': InvalidOrder,  # qty must be less than the maximum allowed
+        '30005': InvalidOrder,  # price exceeds maximum allowed
+        '30007': InvalidOrder,  # price exceeds minimum allowed
+        '30008': InvalidOrder,  # invalid order_type
+        '30009': ExchangeError,  # no position found
+        '30010': InsufficientFunds,  # insufficient wallet balance
+        '30011': PermissionDenied,  # operation not allowed as position is undergoing liquidation
+        '30012': PermissionDenied,  # operation not allowed as position is undergoing ADL
+        '30013': PermissionDenied,  # position is in liq or adl status
+        '30014': InvalidOrder,  # invalid closing order, qty should not greater than size
+        '30015': InvalidOrder,  # invalid closing order, side should be opposite
+        '30016': ExchangeError,  # TS and SL must be cancelled first while closing position
+        '30017': InvalidOrder,  # estimated fill price cannot be lower than current Buy liq_price
+        '30018': InvalidOrder,  # estimated fill price cannot be higher than current Sell liq_price
+        '30019': InvalidOrder,
+        # cannot attach TP/SL params for non-zero position when placing non-opening position order
+        '30020': InvalidOrder,  # position already has TP/SL params
+        '30021': InvalidOrder,  # cannot afford estimated position_margin
+        '30022': InvalidOrder,  # estimated buy liq_price cannot be higher than current mark_price
+        '30023': InvalidOrder,  # estimated sell liq_price cannot be lower than current mark_price
+        '30024': InvalidOrder,  # cannot set TP/SL/TS for zero-position
+        '30025': InvalidOrder,  # trigger price should bigger than 10% of last price
+        '30026': InvalidOrder,  # price too high
+        '30027': InvalidOrder,  # price set for Take profit should be higher than Last Traded Price
+        '30028': InvalidOrder,  # price set for Stop loss should be between Liquidation price and Last Traded Price
+        '30029': InvalidOrder,  # price set for Stop loss should be between Last Traded Price and Liquidation price
+        '30030': InvalidOrder,  # price set for Take profit should be lower than Last Traded Price
+        '30031': InsufficientFunds,  # insufficient available balance for order cost
+        '30032': InvalidOrder,  # order has been filled or cancelled
+        '30033': RateLimitExceeded,  # The number of stop orders exceeds maximum limit allowed
+        '30034': OrderNotFound,  # no order found
+        '30035': RateLimitExceeded,  # too fast to cancel
+        '30036': ExchangeError,  # the expected position value after order execution exceeds the current risk limit
+        '30037': InvalidOrder,  # order already cancelled
+        '30041': ExchangeError,  # no position found
+        '30042': InsufficientFunds,  # insufficient wallet balance
+        '30043': InvalidOrder,  # operation not allowed as position is undergoing liquidation
+        '30044': InvalidOrder,  # operation not allowed as position is undergoing AD
+        '30045': InvalidOrder,  # operation not allowed as position is not normal status
+        '30049': InsufficientFunds,  # insufficient available balance
+        '30050': ExchangeError,  # any adjustments made will trigger immediate liquidation
+        '30051': ExchangeError,  # due to risk limit, cannot adjust leverage
+        '30052': ExchangeError,  # leverage can not less than 1
+        '30054': ExchangeError,  # position margin is invalid
+        '30057': ExchangeError,  # requested quantity of contracts exceeds risk limit
+        '30063': ExchangeError,  # reduce-only rule not satisfied
+        '30067': InsufficientFunds,  # insufficient available balance
+        '30068': ExchangeError,  # exit value must be positive
+        '30074': InvalidOrder,
+        # can't create the stop order, because you expect the order will be triggered when the
+        # LastPrice(or IndexPrice、 MarkPrice, determined by trigger_by) is raising to stop_px,
+        # but the LastPrice(or IndexPrice、 MarkPrice) is already equal to or greater than stop_px,
+        # please adjust base_price or stop_px
+        '30075': InvalidOrder,
+        # can't create the stop order, because you expect the order will be triggered when the
+        # LastPrice(or IndexPrice、 MarkPrice, determined by trigger_by) is falling to stop_px,
+        # but the LastPrice(or IndexPrice、 MarkPrice) is already equal to or less than stop_px,
+        # please adjust base_price or stop_px
+        '30078': ExchangeError,
+        # {"ret_code":30078,"ret_msg":"","ext_code":"","ext_info":"","result":null,"time_now":"1644853040.916000",
+        # "rate_limit_status":73,"rate_limit_reset_ms":1644853040912,"rate_limit":75}
+        # '30084': BadRequest,  # Isolated not modified, see handleErrors below
+        '33004': AuthenticationError,  # apikey already expired
+        '34026': ExchangeError,  # the limit is no change
+        '34036': BadRequest,
+        # {"ret_code":34036,"ret_msg":"leverage not modified","ext_code":"","ext_info":"","result":null,
+        # "time_now":"1652376449.258918","rate_limit_status":74,"rate_limit_reset_ms":1652376449255,"rate_limit":75}
+        '35015': BadRequest,
+        # {"ret_code":35015,"ret_msg":"Qty not in range","ext_code":"","ext_info":"","result":null,"time_now":
+        # "1652277215.821362","rate_limit_status":99,"rate_limit_reset_ms":1652277215819,"rate_limit":100}
+        '130006': InvalidOrder,
+        # {"ret_code":130006,"ret_msg":"The number of contracts exceeds maximum limit allowed: too large",
+        # "ext_code":"","ext_info":"","result":null,"time_now":"1658397095.099030","rate_limit_status":99,
+        # "rate_limit_reset_ms":1658397095097,"rate_limit":100}
+        '130021': InsufficientFunds,
+        '110007': InsufficientFunds,
+        # {"ret_code":130021,"ret_msg":"orderfix price failed for CannotAffordOrderCost.","ext_code":"",
+        # "ext_info":"","result":null,"time_now":"1644588250.204878","rate_limit_status":98,
+        # "rate_limit_reset_ms":1644588250200,"rate_limit":100} |  {"ret_code":130021,"ret_msg":
+        # "oc_diff[1707966351], new_oc[1707966351] with ob[....]+AB[....]","ext_code":"","ext_info":"",
+        # "result":null,"time_now":"1658395300.872766","rate_limit_status":99,"rate_limit_reset_ms":1658395300855,
+        # "rate_limit":100} caused issues/9149#issuecomment-1146559498
+        '130074': InvalidOrder,
+        # {"ret_code":130074,"ret_msg":"expect Rising, but trigger_price[190000000]
+        # \u003c= current[211280000]??LastPrice","ext_code":"","ext_info":"","result":null,
+        # "time_now":"1655386638.067076","rate_limit_status":97,"rate_limit_reset_ms":1655386638065,
+        # "rate_limit":100}
+        '3100116': BadRequest,
+        # {"retCode":3100116,"retMsg":"Order quantity below the lower limit 0.01.","result":null,
+        # "retExtMap":{"key0":"0.01"}}
+        '3100198': BadRequest,  # {"retCode":3100198,"retMsg":"orderLinkId can not be empty.",
+        # "result":null,"retExtMap":{}}
+        '3200300': InsufficientFunds,
+        # {"retCode":3200300,"retMsg":"Insufficient margin balance.","result":null,"retExtMap":{}}
+        '110001': OrderNotFound,  # Order does not exist
+        '110003': InvalidOrder,  # Order price is out of permissible range
+        '110004': InsufficientFunds,  # Insufficient wallet balance
+        '110005': ExchangeError,  # position status.
+        '110006': InvalidOrder,  # cannot afford estimated position_margin
+        '110008': InvalidOrder,  # Order has been finished or canceled
+        '110009': RateLimitExceeded,  # The number of stop orders exceeds maximum limit allowed
+        '110010': InvalidOrder,  # Order already cancelled
+        '110011': PermissionDenied,  # Any adjustments made will trigger immediate liquidation
+        '110012': InsufficientFunds,  # Available balance not enough,
+        '110013': ExchangeError,  # Due to risk limit, cannot set leverage
+        '110014': InsufficientFunds,  # Available balance not enough to add margin
+        '110015': ExchangeError,  # the position is in cross_margin
+        '110016': ExchangeError,  # Requested quantity of contracts exceeds risk limit,
+        # please adjust your risk limit level before trying again
+        '110017': InvalidOrder,  # Reduce-only rule not satisfied
+        '110018': BadRequest,  # userId illegal
+        '110019': BadRequest,  # orderId illegal
+        '110020': InvalidOrder,  # number of active orders greater than 500
+        '110021': BadRequest,  # Open Interest exceeded
+        '110022': InvalidOrder,  # qty has been limited, cannot modify the order to add qty
+        '110023': BadRequest,
+        '110024': BadRequest,
+        '110025': ExchangeError,
+        '110026': ExchangeError,
+        '110027': ExchangeError,
+        '110028': ExchangeError,
+        '110029': ExchangeError,
+        '110030': InvalidOrder,
+        '110031': ExchangeError,
+        '110032': ExchangeError,
+        '110033': ExchangeError,
+        '110034': ExchangeError,
+        '110035': ExchangeError,
+        '110036': ExchangeError,
+        '110037': ExchangeError,
+        '110038': ExchangeError,
+        '110039': ExchangeError,
+        '110040': ExchangeError,
+        '110041': ExchangeError,
+        '110042': ExchangeError,
+        '110043': ExchangeError,
+        '110044': InsufficientFunds,  # Insufficient available margin
+        '110045': InsufficientFunds,  # Insufficient wallet balance
+        '110046': ExchangeError,
+        '110047': InsufficientFunds,  # Risk limit cannot be adjusted due to insufficient available margin
+        '110048': ExchangeError,
+        '110049': ExchangeError,
+        '110050': ExchangeError,
+        '110051': InsufficientFunds,
+        '110052': InsufficientFunds,
+        '110053': InsufficientFunds,
+        '110054': ExchangeError,
+        '110055': ExchangeError,
+        '110056': ExchangeError,
+        '110057': ExchangeError,
+        '110058': ExchangeError,
+        '110059': ExchangeError,
+        '110060': ExchangeError,
+        '110061': ExchangeError,
+        '110062': ExchangeError,
+        '110063': ExchangeError,
+        '110064': ExchangeError,
+        '110065': ExchangeError,
+        '110066': ExchangeError,
+        '110067': ExchangeError,
+        '110068': ExchangeError,
+        '110069': ExchangeError,
+        '110070': ExchangeError,
+    }
+
+    @staticmethod
+    def from_code(code: int):
+        return ExceptionMapper.exception_map.get(str(code))
+
+
 # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
 
 def _result_to_float_values(d: Union[List, dict]) -> Union[dict, List[float]]:
@@ -590,8 +872,14 @@ class ByBitRest:
             response.raise_for_status()
             raise
         else:
-            if data['retCode' if 'retCode' in data else 'ret_code'] != 0:
-                raise Exception(data['retMsg' if 'retMsg' in data else 'ret_msg'])
+            ret_code = data['retCode' if 'retCode' in data else 'ret_code']
+            ret_msg = data['retMsg' if 'retMsg' in data else 'ret_msg']
+            if ret_code != 0:
+                e = ExceptionMapper.from_code(ret_code)
+                if e is None:
+                    raise Exception(ret_msg)
+                else:
+                    raise e(ret_msg)
             return data['result']
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
