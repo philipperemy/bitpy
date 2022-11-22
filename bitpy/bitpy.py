@@ -457,7 +457,7 @@ class ByBitRest:
             base_url: str = "https://api.bybit.com",
             api_key: Optional[str] = None,
             api_secret: Optional[str] = None,
-            timeout: int = 3,
+            timeout: int = 2,
             category: str = 'linear'
     ) -> None:
         self.timeout = timeout
