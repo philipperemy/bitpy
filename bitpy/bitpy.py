@@ -17,6 +17,7 @@ import numpy as np
 import requests
 import websocket
 from requests import Session, Response
+from urllib3 import HTTPSConnectionPool
 
 logger = logging.getLogger(__name__)
 
@@ -507,13 +508,34 @@ class ByBitRest:
             result = _result_to_float_values(result)
         return result
 
+    @staticmethod
+    def _retry_on_error(call, retries: int = 5, wait=0.0, verbose=True, *args, **kwargs):
+        for i in range(retries):
+            try:
+                return call(*args, **kwargs)
+            except Exception as e:
+                if 'timed out' in str(e) or \
+                        'timeout' in str(e) or \
+                        isinstance(e, TimeoutError) or \
+                        isinstance(e, HTTPSConnectionPool):
+                    if verbose:
+                        logger.warning(f'{call.__name__}, args: {args}, kwargs: {kwargs}. Error: {str(e)}.')
+                    if i == retries - 1:
+                        raise e
+                    if wait > 0:
+                        time.sleep(wait)
+                else:
+                    raise e
+
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
-        return self._post_processing(self._request('GET', path, params=params), pagination=pagination)
+        req = self._retry_on_error(self._request, method='GET', path=path, params=params)
+        return self._post_processing(req, pagination=pagination)
 
     def _post(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
-        return self._post_processing(self._request('POST', path, params=params), pagination=pagination)
+        req = self._retry_on_error(self._request, method='POST', path=path, params=params)
+        return self._post_processing(req, pagination=pagination)
 
     def _sign_request(self, timestamp: str, params: str) -> str:
         payload = str(params)
@@ -969,18 +991,20 @@ class ByBitStream:
             self._last_debug_ts = ts
         if ts - self._last_debug_ts > self.print_status_every:
             self._last_debug_ts = ts
-            ticker_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('tickers')], [])
-            orderbook_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('orderbook')], [])
-            ticker_mean = np.mean(ticker_latencies) * 1000
-            ticker_median = np.median(ticker_latencies) * 1000
-            orderbook_mean = np.mean(orderbook_latencies) * 1000
-            orderbook_median = np.median(orderbook_latencies) * 1000
-            logger.info(f'Stats: tickers: mean/median/count {ticker_mean:.2f}ms/'
-                        f'{ticker_median:.2f}ms/{len(ticker_latencies)}, '
-                        f'(interval: {self.print_status_every}s).')
-            logger.info(f'Stats: orderbook: mean/median/count {orderbook_mean:.2f}ms/'
-                        f'{orderbook_median:.2f}ms/{len(orderbook_latencies)},'
-                        f' (interval: {self.print_status_every}s).')
+            if self.subscribe_to_tickers:
+                ticker_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('tickers')], [])
+                ticker_mean = np.mean(ticker_latencies) * 1000
+                ticker_median = np.median(ticker_latencies) * 1000
+                logger.info(f'Stats: tickers: mean/median/count {ticker_mean:.2f}ms/'
+                            f'{ticker_median:.2f}ms/{len(ticker_latencies)}, '
+                            f'(interval: {self.print_status_every}s).')
+            if self.subscribe_to_order_books:
+                orderbook_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('orderbook')], [])
+                orderbook_mean = np.mean(orderbook_latencies) * 1000
+                orderbook_median = np.median(orderbook_latencies) * 1000
+                logger.info(f'Stats: orderbook: mean/median/count {orderbook_mean:.2f}ms/'
+                            f'{orderbook_median:.2f}ms/{len(orderbook_latencies)},'
+                            f' (interval: {self.print_status_every}s).')
             self.latency_per_sub.clear()
 
     # noinspection PyUnusedLocal
