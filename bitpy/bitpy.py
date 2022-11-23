@@ -609,6 +609,10 @@ class ByBitExecutions:
             if symbol not in self.executions:
                 self.executions[symbol] = []
             self.executions[symbol].append(result)
+            order_id = result['orderId']
+            short_order_id = order_id.split('-')[-1]
+            logger.info(f'Execution: {short_order_id} {result["execType"].title()} {result["side"]} '
+                        f'{result["symbol"]} {result["execQty"]}@{result["execPrice"]}')
 
 
 class ByBitPositions:
@@ -659,9 +663,10 @@ class ByBitOrderStatuses:
             if client_id is not None and client_id != '':
                 self.order_statuses_order_client_id[client_id] = result
             short_order_id = order_id.split('-')[-1]
-            logger.info(f'OrderID:{short_order_id} {result["orderStatus"]} '
+            price = '<market>' if result['orderType'] == 'Market' else float(result["price"])
+            logger.info(f'OrderStatus: {short_order_id} {result["orderStatus"]} '
                         f'{result["side"]} {result["symbol"]} '
-                        f'{float(result["qty"])}@{float(result["price"])}, '
+                        f'{float(result["qty"])}@{price}, '
                         f'CumExecQty={float(result["cumExecQty"])}, ReduceOnly={1 if result["reduceOnly"] else 0}.')
 
 
