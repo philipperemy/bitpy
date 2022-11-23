@@ -19,6 +19,7 @@ A tiny library made by traders for traders in python.
    - Cancel Order
    - Mass Cancel Orders
    - Get Balances
+   - Executions
 - Unified Interface: REST + Websocket.
    - Order books fetched from the websocket if available otherwise from the REST
    - Tickers fetched from the websocket if available otherwise from the REST
