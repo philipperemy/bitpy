@@ -1302,16 +1302,18 @@ class ByBitStream:
 
     # noinspection PyUnusedLocal
     @staticmethod
-    def _on_error(ws, error):
+    def _on_error(ws, error, *args, **kwargs):
         logger.warning(f'WEBSOCKET: error: {error}.')
 
     # noinspection PyUnusedLocal
     @staticmethod
-    def _on_close(ws):
+    def _on_close(ws, *args, **kwargs):
         logger.warning('WEBSOCKET: feed closed.')
+        time.sleep(5)
+        ws.run_forever(ping_interval=20, ping_timeout=10)
 
     # noinspection PyUnusedLocal
-    def _on_open(self, ws):
+    def _on_open(self, ws, *args, **kwargs):
         logger.info('WEBSOCKET: open feed.')
         topics = []
         if self.private:
