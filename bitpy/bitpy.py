@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from queue import Queue, Empty
@@ -541,6 +541,17 @@ class ByBit:
         if self.private_feed is not None:
             return self.private_feed.execution_handler.get_executions(symbol, order_id, client_id)
         return self.rest.get_executions(symbol, order_id, client_id, **kwargs)
+
+    def get_trade_history(
+            self,
+            currency: Optional[str] = None,
+            start_date: Optional[datetime] = None,
+            end_date: Optional[datetime] = None,
+            **kwargs
+    ) -> List[dict]:
+        start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        return self.rest.get_trade_history(currency=currency, startTime=start_time, endTime=end_time, **kwargs)
 
 
 class TimeInForce(Enum):
@@ -1140,6 +1151,21 @@ class ByBitRest:
 
     def fetch_perp_markets(self, **kwargs) -> List[Dict]:
         return [a for a in self._get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
+
+    def get_trade_history(
+            self,
+            currency: Optional[str] = None,
+            **kwargs
+    ) -> List[dict]:
+        path = '/unified/v3/private/account/transaction-log'
+        if currency is None:
+            currency = 'USDT'
+        params = {
+            'category': self.category,
+            'currency': currency,
+        }
+        params.update(kwargs)
+        return self._paginate(call=self._get, unique_key='tradeId', path=path, params=params)
 
     def get_executions(
             self,
