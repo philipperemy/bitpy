@@ -817,7 +817,7 @@ class ByBitRest:
                         isinstance(e, TimeoutError) or \
                         isinstance(e, HTTPSConnectionPool):
                     if verbose:
-                        logger.warning(f'{call.__name__}, args: {args}, kwargs: {kwargs}. Error: {str(e)}.')
+                        logger.info(f'{call.__name__}, args: {args}, kwargs: {kwargs}. Error: {str(e)}.')
                     if i == retries - 1:
                         raise e
                     if wait > 0:
