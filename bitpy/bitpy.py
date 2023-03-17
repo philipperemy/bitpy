@@ -306,29 +306,49 @@ class ExceptionMapper:
         return ExceptionMapper.exception_map.get(str(code))
 
 
-def download_public_trades(start_date: datetime, end_date: datetime, symbol: str) -> pd.DataFrame:
-    tmp = Path(tempfile.gettempdir()) / 'bybit_trades'
-    tmp.mkdir(parents=True, exist_ok=True)
+def download_public_trades(
+        start_date: datetime,
+        end_date: datetime,
+        symbol: str,
+        exchange: str = 'bybit'
+) -> pd.DataFrame:
+    is_bybit = exchange == 'bybit'
+    assert exchange in ['bybit', 'binance']
     assert symbol.endswith('USDT')
+    tmp = Path(tempfile.gettempdir()) / f'{exchange}_trades'
+    tmp.mkdir(parents=True, exist_ok=True)
     cursor = start_date
     records = []
     while cursor <= end_date:
         date = cursor.strftime('%Y-%m-%d')
-        filename = f'{symbol}{date}.csv.gz'
+        if is_bybit:
+            filename = f'{symbol}{date}.csv.gz'
+        else:
+            filename = f'{symbol}-aggTrades-{date}.zip'
         local_file = tmp / filename  # (tmp / Path(filename).stem).with_suffix('.csv')
         if not local_file.exists():
-            url = f'https://public.bybit.com/trading/{symbol}/{filename}'
+            if is_bybit:
+                url = f'https://public.bybit.com/trading/{symbol}/{filename}'
+            else:
+                url = f'https://data.binance.vision/data/futures/um/daily/aggTrades/{symbol}/{filename}'
             print(f'Downloading {url} to {local_file}.')
-            data = pd.read_csv(url, compression='gzip')
-            data.to_csv(local_file, compression='gzip', index=False)
+            compression = 'gzip' if is_bybit else 'zip'
+            # noinspection PyTypeChecker
+            data = pd.read_csv(url, compression=compression)
+            # noinspection PyTypeChecker
+            data.to_csv(local_file, compression=compression, index=False)
         else:
             print(f'Reading from {local_file}.')
             data = pd.read_csv(local_file)
         records.append(data)
         cursor += timedelta(days=1)
     records = pd.concat(records, axis=0)
-    records['dateTime'] = pd.to_datetime(records['timestamp'], unit='s')
-    records['side'] = records['side'].str.lower()
+    if is_bybit:
+        records['side'] = records['side'].str.lower()
+        records['dateTime'] = pd.to_datetime(records['timestamp'], unit='s')
+    else:
+        records['dateTime'] = pd.to_datetime(records['transact_time'], unit='ms')
+        records['side'] = records['is_buyer_maker'].apply(lambda x: 'sell' if x else 'buy')
     records.set_index('dateTime', inplace=True)
     records = records[start_date:end_date]
     return records
