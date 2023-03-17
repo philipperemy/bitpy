@@ -2,10 +2,11 @@ import hashlib
 import hmac
 import json
 import logging
+import tempfile
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from queue import Queue, Empty
@@ -14,6 +15,7 @@ from typing import Union
 from urllib.parse import urlencode
 
 import numpy as np
+import pandas as pd
 import requests
 import websocket
 from requests import Session, Response
@@ -302,6 +304,34 @@ class ExceptionMapper:
     @staticmethod
     def from_code(code: int):
         return ExceptionMapper.exception_map.get(str(code))
+
+
+def download_public_trades(start_date: datetime, end_date: datetime, symbol: str) -> pd.DataFrame:
+    tmp = Path(tempfile.gettempdir()) / 'bybit_trades'
+    tmp.mkdir(parents=True, exist_ok=True)
+    assert symbol.endswith('USDT')
+    cursor = start_date
+    records = []
+    while cursor <= end_date:
+        date = cursor.strftime('%Y-%m-%d')
+        filename = f'{symbol}{date}.csv.gz'
+        local_file = tmp / filename  # (tmp / Path(filename).stem).with_suffix('.csv')
+        if not local_file.exists():
+            url = f'https://public.bybit.com/trading/{symbol}/{filename}'
+            print(f'Downloading {url} to {local_file}.')
+            data = pd.read_csv(url, compression='gzip')
+            data.to_csv(local_file, compression='gzip', index=False)
+        else:
+            print(f'Reading from {local_file}.')
+            data = pd.read_csv(local_file)
+        records.append(data)
+        cursor += timedelta(days=1)
+    records = pd.concat(records, axis=0)
+    records['dateTime'] = pd.to_datetime(records['timestamp'], unit='s')
+    records['side'] = records['side'].str.lower()
+    records.set_index('dateTime', inplace=True)
+    records = records[start_date:end_date]
+    return records
 
 
 # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
