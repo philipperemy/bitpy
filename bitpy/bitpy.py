@@ -23,6 +23,10 @@ from urllib3 import HTTPSConnectionPool
 
 logger = logging.getLogger(__name__)
 
+logging.getLogger('websocket').setLevel(logging.ERROR)
+
+
+# https://bybit-exchange.github.io/docs/v5/upgrade-guide#v5-and-v3-interface-mapping-list
 
 class InsufficientFunds(Exception):
     pass
@@ -450,6 +454,10 @@ PERP_LIST = [
     'ZECUSDT', 'ZENUSDT', 'ZILUSDT', 'ZRXUSDT'
 ]
 
+ACCOUNT_TYPE_UNIFIED = 'UNIFIED'
+ACCOUNT_TYPE_CONTRACT = 'CONTRACT'
+ACCOUNT_TYPE_COPY_TRADING = 'COPYTRADING'
+
 
 class ByBit:
 
@@ -459,15 +467,19 @@ class ByBit:
             subscribe_to_order_books: bool = False,
             subscribe_to_tickers: bool = False,
             subscribe_to_private_feed: bool = True,
-            orderbook_depth: int = 25,
+            orderbook_depth: int = 50,
+            account_type: str = ACCOUNT_TYPE_UNIFIED,
+            use_v3: bool = False,
             category: str = 'linear',
             base_url: str = "https://api.bybit.com",
             timeout: int = 3,
     ):
+        self.account_type = account_type
         self.credentials = credentials
         self.rest = ByBitRest.from_credentials_file(
             self.credentials, category=category,
-            base_url=base_url, timeout=timeout
+            base_url=base_url, timeout=timeout,
+            use_v3=use_v3
         )
         self.subscribe_to_order_books = subscribe_to_order_books
         self.subscribe_to_tickers = subscribe_to_tickers
@@ -475,7 +487,7 @@ class ByBit:
         self.public_feed = None
         if self.subscribe_to_order_books or self.subscribe_to_tickers:
             self.public_feed = ByBitStream(
-                credentials=None,
+                credentials=None, use_v3=use_v3,
                 subscribe_to_order_books=self.subscribe_to_order_books,
                 subscribe_to_tickers=self.subscribe_to_tickers,
                 orderbook_depth=self.orderbook_depth,
@@ -484,7 +496,9 @@ class ByBit:
             )
         self.private_feed = None
         if subscribe_to_private_feed and self.credentials is not None:
-            self.private_feed = ByBitStream(self.credentials, private=True, background=True, rest_api=self.rest)
+            self.private_feed = ByBitStream(
+                self.credentials, use_v3=use_v3, private=True, background=True, rest_api=self.rest
+            )
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         if self.private_feed is not None:
@@ -498,7 +512,11 @@ class ByBit:
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None) -> dict:
         if self.subscribe_to_order_books:
-            return self.public_feed.orderbook_handler.get_orderbook(symbol)
+            self.public_feed.subscribe_to_orderbook(symbol, depth)
+            # depth is defined in the stream.
+            ob = self.public_feed.orderbook_handler.get_orderbook(symbol)
+            if ob is not None:
+                return ob
         return self.rest.get_orderbook(symbol, depth)
 
     def get_orders(
@@ -515,12 +533,13 @@ class ByBit:
 
     def get_tickers(self, symbol: Optional[str] = None, **kwargs):
         if self.subscribe_to_tickers:
-            tickers = self.public_feed.ticker_handler.tickers
-            for t in tickers.values():
-                t['bidPrice'] = t['bid1Price']
-                t['askPrice'] = t['ask1Price']
-            return tickers.get(symbol) if symbol is not None else tickers
-        return self.rest.get_markets(symbol, **kwargs)
+            tickers = dict(self.public_feed.ticker_handler.tickers)
+        else:
+            tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
+        for t in tickers.values():
+            t['bidPrice'] = t['bid1Price']
+            t['askPrice'] = t['ask1Price']
+        return tickers.get(symbol) if symbol is not None else tickers
 
     def get_order_status(
             self,
@@ -789,7 +808,6 @@ class ByBitOrderBooks:
                 for u in data[key[0]]:
                     value = float(u[1])
                     price = float(u[0])
-
                     if value == 0:
                         del self.books[symbol][key[1]][price]
                     else:
@@ -806,8 +824,12 @@ class ByBitRest:
             api_key: Optional[str] = None,
             api_secret: Optional[str] = None,
             timeout: int = 2,
+            account_type: str = ACCOUNT_TYPE_UNIFIED,
+            use_v3: bool = False,
             category: str = 'linear'
     ) -> None:
+        self.account_type = account_type
+        self.use_v3 = use_v3
         self.timeout = timeout
         self.category = category
         # self.throttler = ByBitThrottler()
@@ -877,6 +899,8 @@ class ByBitRest:
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
+        if not self.use_v3:
+            params.update({'accountType': self.account_type})
         req = self._retry_on_error(self._request, method='GET', path=path, params=params)
         return self._post_processing(req, pagination=pagination)
 
@@ -951,7 +975,8 @@ class ByBitRest:
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
-        return self._paginate(self._get, unique_key='symbol', path='/unified/v3/private/position/list', params=params)
+        path = '/unified/v3/private/position/list' if self.use_v3 else '/v5/position/list'
+        return self._paginate(self._get, unique_key='symbol', path=path, params=params)
 
     def get_orders(
             self,
@@ -962,18 +987,19 @@ class ByBitRest:
     ) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
-        path = '/unified/v3/private/order/list'
+        path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
 
     def get_open_orders(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
-        path = '/unified/v3/private/order/unfilled-orders'
+        path = '/unified/v3/private/order/unfilled-orders' if self.use_v3 else '/v5/order/realtime'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
 
     def get_balances(self, **kwargs) -> List[dict]:
         params = dict(kwargs)
-        return self._get('/unified/v3/private/account/wallet/balance', params=params)
+        path = '/unified/v3/private/account/wallet/balance' if self.use_v3 else '/v5/account/wallet-balance'
+        return self._get(path, params=params)
 
     def query_symbols_v2(self, **kwargs) -> List[dict]:
         params = dict(kwargs)
@@ -1001,12 +1027,14 @@ class ByBitRest:
         symbol = self._resolve_symbol_from_cache(client_id, order_id, symbol)
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
-        return self._post('/unified/v3/private/order/cancel', params)
+        path = '/unified/v3/private/order/cancel' if self.use_v3 else '/v5/order/cancel'
+        return self._post(path, params)
 
     def get_markets(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
-        return self._get('/derivatives/v3/public/tickers', params)
+        path = '/derivatives/v3/public/tickers' if self.use_v3 else '/v5/market/tickers'
+        return self._get(path, params)
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None, **kwargs) -> dict:
         if depth is not None:
@@ -1016,7 +1044,8 @@ class ByBitRest:
                 depth = 1
         params = {'category': self.category, 'symbol': symbol, 'limit': depth}
         params.update(kwargs)
-        ob = self._get('/derivatives/v3/public/order-book/L2', params)
+        path = '/derivatives/v3/public/order-book/L2' if self.use_v3 else '/v5/market/orderbook'
+        ob = self._get(path, params)
         ob['bids'] = list(reversed([[float(t[0]), float(t[1])] for t in ob['b']]))
         ob['asks'] = [[float(t[0]), float(t[1])] for t in ob['a']]
         del ob['a']
@@ -1045,7 +1074,8 @@ class ByBitRest:
             params['settleCoin'] = 'USDT'
         params.update(kwargs)
         try:
-            return self._post('/unified/v3/private/order/cancel-all', params)
+            path = '/unified/v3/private/order/cancel-all' if self.use_v3 else '/v5/order/cancel-all'
+            return self._post(path, params)
         except Exception as e:
             if str(e).lower() == 'cancel all no result':
                 return None
@@ -1076,8 +1106,9 @@ class ByBitRest:
         params.update(kwargs)
         if client_id is None:
             assert order_id is not None
+        path = '/unified/v3/private/order/replace' if self.use_v3 else '/v5/order/amend'
         return self._post(
-            path='/unified/v3/private/order/replace',
+            path=path,
             params=params
         )
 
@@ -1138,7 +1169,8 @@ class ByBitRest:
             'timeInForce': tif,
         }
         params.update(kwargs)
-        resp = self._post(path='/unified/v3/private/order/create', params=params)
+        path = '/unified/v3/private/order/create' if self.use_v3 else '/v5/order/create'
+        resp = self._post(path=path, params=params)
         order_id = resp.get('orderId')
         client_id = resp.get('orderLinkId')
         if order_id is not None:
@@ -1152,7 +1184,7 @@ class ByBitRest:
             symbol: Optional[str] = None,
             **kwargs
     ) -> List[dict]:
-        path = '/unified/v3/private/order/list'
+        path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
         params = {
             'category': self.category,
             'symbol': symbol,
@@ -1192,10 +1224,11 @@ class ByBitRest:
     def _get_instruments_info(self, **kwargs) -> List[dict]:
         params = {'category': self.category}
         params.update(kwargs)
+        path = '/derivatives/v3/public/instruments-info' if self.use_v3 else '/v5/market/instruments-info'
         return self._paginate(
             self._get,
             unique_key='symbol',
-            path='/derivatives/v3/public/instruments-info',
+            path=path,
             params=params
         )
 
@@ -1207,7 +1240,7 @@ class ByBitRest:
             currency: Optional[str] = None,
             **kwargs
     ) -> List[dict]:
-        path = '/unified/v3/private/account/transaction-log'
+        path = '/unified/v3/private/account/transaction-log' if self.use_v3 else '/v5/account/transaction-log'
         if currency is None:
             currency = 'USDT'
         params = {
@@ -1225,10 +1258,11 @@ class ByBitRest:
             **kwargs):
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
+        path = '/unified/v3/private/execution/list' if self.use_v3 else '/v5/execution/list'
         return self._paginate(
             self._get,
             unique_key='execId',
-            path='/unified/v3/private/execution/list',
+            path=path,
             params=params
         )
 
@@ -1240,19 +1274,29 @@ class ByBitStream:
             credentials: Union[Path, str, None] = None,
             subscribe_to_order_books: bool = True,
             subscribe_to_tickers: bool = True,
-            orderbook_depth: int = 25,
+            orderbook_depth: int = 50,
             private: bool = False,
+            use_v3: bool = False,
+            category: str = 'linear',
             background: bool = False,
             print_stats_every: int = 600,
             rest_api: Optional[ByBitRest] = None
     ):
+        self.use_v3 = use_v3
         self.rest_api = rest_api
         self.background = background
-        self.private_topics = [
-            'user.order.unifiedAccount',
-            'user.position.unifiedAccount',
-            'user.execution.unifiedAccount',
-        ]
+        if self.use_v3:
+            self.private_topics = [
+                'user.order.unifiedAccount',
+                'user.position.unifiedAccount',
+                'user.execution.unifiedAccount',
+            ]
+        else:
+            self.private_topics = [
+                'order',
+                'position',
+                'execution',
+            ]
         self.private = private
         if credentials is not None:
             credentials = _read_credentials(Path(credentials).expanduser())
@@ -1261,20 +1305,31 @@ class ByBitStream:
         else:
             self.api_key = None
             self.api_secret = None
-        if self.private:
-            self.url = 'wss://stream.bybit.com/unified/private/v3'
-        else:
-            self.url = 'wss://stream.bybit.com/contract/usdt/public/v3'
-        logger.info(f'WEBSOCKET: url: {self.url}.')
+        if use_v3:
+            if self.private:
+                self.url = 'wss://stream.bybit.com/unified/private/v3'
+            else:
+                self.url = 'wss://stream.bybit.com/contract/usdt/public/v3'
+        else:  # v5.
+            if self.private:
+                self.url = 'wss://stream.bybit.com/v5/private'
+            else:
+                self.url = f'wss://stream.bybit.com/v5/public/{category}'
+        logger.info(f'URL: {self.url}.')
         bybit_time = float(requests.get('https://api.bybit.com/v2/public/time').json()['time_now'])
         our_time = time.time()
         self.latency_offset = bybit_time - our_time
+        logger.info(f'Latency offset is {self.latency_offset} seconds (adjusted).')
         if self.latency_offset < 0:
             self.latency_offset = 0
         self._last_debug_ts = None
         self.print_status_every = print_stats_every
         self.latency_per_sub = defaultdict(list)
-        assert orderbook_depth in [1, 25, 50, 100, 200, 500]
+        if self.use_v3:
+            assert orderbook_depth in [1, 25, 50, 100, 200, 500]
+        else:
+            # https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook
+            assert orderbook_depth in [1, 50, 200, 500]
         self.subscribe_to_order_books = subscribe_to_order_books
         self.subscribe_to_tickers = subscribe_to_tickers
         self.orderbook_depth = orderbook_depth
@@ -1283,6 +1338,7 @@ class ByBitStream:
         self.order_status_handler = ByBitOrderStatuses()
         self.position_handler = ByBitPositions()
         self.execution_handler = ByBitExecutions()
+        self.order_book_symbols = set()
         self.ws = None
         self._ready = False
         self._conn_ws()
@@ -1303,6 +1359,10 @@ class ByBitStream:
         ).hexdigest())
         ws.send(json.dumps({'op': 'auth', 'args': [key, expires, signature]}))
 
+    @property
+    def type(self):
+        return 'private' if self.private else 'public'
+
     # noinspection PyUnusedLocal
     def _on_message(self, ws, message):
         logger.debug(message)
@@ -1312,7 +1372,7 @@ class ByBitStream:
             # https://bybit-exchange.github.io/docs/futuresV2/inverse/#t-api
             if 'op' in data and data['op'] == 'subscribe':
                 if data['success']:
-                    logger.info('Successfully subscribed.')
+                    logger.info(f'Subscription successful. Connection ID is {data["conn_id"]}.')
                     self._ready = True
                     return
                 else:
@@ -1326,6 +1386,10 @@ class ByBitStream:
             if 'type' in data and data['type'] == 'COMMAND_RESP':
                 logger.info('Command response received.')
                 self._ready = True
+                return
+
+            if 'op' in data and data['op'] == 'auth':
+                logger.info(f'Authenticated. Connection ID is {data["conn_id"]}.')
                 return
 
             if 'topic' in data:
@@ -1379,21 +1443,21 @@ class ByBitStream:
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_error(ws, error, *args, **kwargs):
-        logger.warning(f'WEBSOCKET: error: {error}.')
+        logger.warning(f'Error: {error}.')
 
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_close(ws, *args, **kwargs):
-        logger.warning('WEBSOCKET: feed closed.')
+        logger.warning('Feed closed.')
         time.sleep(5)
         ws.run_forever(ping_interval=20, ping_timeout=10)
 
     # noinspection PyUnusedLocal
     def _on_open(self, ws, *args, **kwargs):
-        logger.info('WEBSOCKET: open feed.')
+        logger.debug('Open feed.')
         topics = []
         if self.private:
-            logger.info('WEBSOCKET: auth.')
+            logger.debug('Auth.')
             self.send_auth(ws)
             topics = self.private_topics
         else:
@@ -1401,26 +1465,35 @@ class ByBitStream:
                 perp_list = [a['symbol'] for a in self.rest_api.fetch_perp_markets()]
             else:
                 perp_list = PERP_LIST
-            order_book_topics = [f'orderbook.{self.orderbook_depth}.{p}' for p in perp_list]
-            ticker_topics = [f'tickers.{p}' for p in perp_list]
+
+            # The order book subscriptions are made on a case by case basis.
             if self.subscribe_to_tickers:
-                logger.info('Subscribe to order books.')
+                ticker_topics = [f'tickers.{p}' for p in perp_list]
+                logger.info('Subscribing to tickers.')
                 topics.extend(ticker_topics)
-            if self.subscribe_to_order_books:
-                logger.info('Subscribe to tickers.')
-                topics.extend(order_book_topics)
-        logger.info(f'WEBSOCKET: subscribe to {",".join(topics)}')
+        self.subscribe(topics)
+
+    def subscribe_to_orderbook(self, symbol: str, depth: Optional[int] = None):
+        depth = depth if depth is not None else self.orderbook_depth
+        if symbol not in self.order_book_symbols:
+            self.subscribe([f'orderbook.{depth}.{symbol}'])
+
+    def subscribe(self, topics: List[str]):
+        topics_str = ",".join(topics)
+        if len(topics) > 100:
+            topics_str = topics_str[0:40] + ' [ -> ] ' + topics_str[-40:] + ' (ALL)'
+        logger.info(f'Subscribing to {topics_str}.')
         self.ws.send(json.dumps({'op': 'subscribe', 'args': topics}))
 
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_pong(*data):
-        logger.debug('WEBSOCKET: pong received.')
+        logger.debug('Pong received.')
 
     # noinspection PyUnusedLocal
     @staticmethod
     def _on_ping(ws, *data):
-        logger.debug(f'WEBSOCKET: ping sent {datetime.now()}.')
+        logger.debug(f'Ping sent {datetime.now()}.')
 
     def _run_forever(self):
         self.ws.run_forever(
@@ -1439,8 +1512,7 @@ class ByBitStream:
             on_open=self._on_open
         )
         if self.background:
-            _runs_in_a_thread(self._run_forever, name='WS')
+            _runs_in_a_thread(self._run_forever, name=f'WS_{self.type}')
             self.wait_until_ready()
-            logger.info('Websocket ready.')
         else:
             self._run_forever()

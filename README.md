@@ -1,4 +1,4 @@
-## ByBit - Derivatives V3 - Unified Margin API
+## ByBit V5 - Unified Margin API
 
 A tiny library made by traders for traders in python.
 

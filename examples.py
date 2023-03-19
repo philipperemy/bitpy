@@ -17,13 +17,12 @@ CREDENTIALS_FILE = credentials_dir / 'bybit.json'
 # }
 
 # Go to https://www.bybit.com/en-US/
-# Put 5K USDT on the Derivatives Account.
 # Upgrade to Unified Margin Account.
 
 
 def main():
     symbol = 'BTCUSDT'
-    bybit = ByBit(credentials=CREDENTIALS_FILE)
+    bybit = ByBit(credentials=CREDENTIALS_FILE, subscribe_to_tickers=True, subscribe_to_order_books=True)
 
     logging.info(bybit.get_balances())
 
@@ -54,5 +53,9 @@ def main():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(threadName)12s - %(levelname)s - %(message)s',
+        stream=sys.stdout
+    )
     main()
