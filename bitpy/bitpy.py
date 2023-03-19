@@ -319,7 +319,7 @@ def download_public_trades(
     tmp.mkdir(parents=True, exist_ok=True)
     cursor = start_date
     records = []
-    while cursor <= end_date:
+    while cursor <= end_date.replace(hour=23, minute=59, second=59, microsecond=999999):
         date = cursor.strftime('%Y-%m-%d')
         if is_bybit:
             filename = f'{symbol}{date}.csv.gz'
