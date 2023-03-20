@@ -429,31 +429,6 @@ def _round_tick(x, tick_size):
     return round(x / tick_size) * tick_size
 
 
-# fixed list.
-PERP_LIST = [
-    '10000NFTUSDT', '1000BTTUSDT', '1000LUNCUSDT', '1000XECUSDT', '1INCHUSDT', 'AAVEUSDT', 'ACHUSDT',
-    'ADAUSDT', 'AGLDUSDT', 'AKROUSDT', 'ALGOUSDT', 'ALICEUSDT', 'ALPHAUSDT', 'ANKRUSDT', 'ANTUSDT', 'APEUSDT',
-    'API3USDT', 'APTUSDT', 'ARPAUSDT', 'ARUSDT', 'ASTRUSDT', 'ATOMUSDT', 'AUDIOUSDT', 'AVAXUSDT', 'AXSUSDT',
-    'BAKEUSDT', 'BALUSDT', 'BANDUSDT', 'BATUSDT', 'BCHUSDT', 'BELUSDT', 'BICOUSDT', 'BITUSDT', 'BLZUSDT',
-    'BNBUSDT', 'BNXUSDT', 'BOBAUSDT', 'BSVUSDT', 'BSWUSDT', 'BTCUSDT', 'C98USDT', 'CEEKUSDT', 'CELOUSDT',
-    'CELRUSDT', 'CHRUSDT', 'CHZUSDT', 'CKBUSDT', 'COMPUSDT', 'COTIUSDT', 'CREAMUSDT', 'CROUSDT', 'CRVUSDT',
-    'CTCUSDT', 'CTKUSDT', 'CTSIUSDT', 'CVCUSDT', 'CVXUSDT', 'DARUSDT', 'DASHUSDT', 'DENTUSDT', 'DGBUSDT',
-    'DODOUSDT', 'DOGEUSDT', 'DOTUSDT', 'DUSKUSDT', 'DYDXUSDT', 'EGLDUSDT', 'ENJUSDT', 'ENSUSDT', 'EOSUSDT',
-    'ETCUSDT', 'ETHUSDT', 'ETHWUSDT', 'FILUSDT', 'FITFIUSDT', 'FLMUSDT', 'FLOWUSDT', 'FTMUSDT', 'FXSUSDT',
-    'GALAUSDT', 'GALUSDT', 'GLMRUSDT', 'GMTUSDT', 'GMXUSDT', 'GRTUSDT', 'GTCUSDT', 'HBARUSDT', 'HNTUSDT',
-    'HOTUSDT', 'ICPUSDT', 'ICXUSDT', 'ILVUSDT', 'IMXUSDT', 'INJUSDT', 'IOSTUSDT', 'IOTAUSDT', 'IOTXUSDT',
-    'JASMYUSDT', 'JSTUSDT', 'KAVAUSDT', 'KDAUSDT', 'KLAYUSDT', 'KNCUSDT', 'KSMUSDT', 'LDOUSDT', 'LINAUSDT',
-    'LINKUSDT', 'LITUSDT', 'LOOKSUSDT', 'LPTUSDT', 'LRCUSDT', 'LTCUSDT', 'LUNA2USDT', 'MANAUSDT', 'MASKUSDT',
-    'MATICUSDT', 'MINAUSDT', 'MKRUSDT', 'MTLUSDT', 'NEARUSDT', 'NEOUSDT', 'OCEANUSDT', 'OGNUSDT', 'OMGUSDT',
-    'ONEUSDT', 'ONTUSDT', 'OPUSDT', 'PAXGUSDT', 'PEOPLEUSDT', 'QTUMUSDT', 'REEFUSDT', 'RENUSDT', 'REQUSDT',
-    'RNDRUSDT', 'ROSEUSDT', 'RSRUSDT', 'RSS3USDT', 'RUNEUSDT', 'RVNUSDT', 'SANDUSDT', 'SCRTUSDT', 'SCUSDT',
-    'SFPUSDT', 'SHIB1000USDT', 'SKLUSDT', 'SLPUSDT', 'SNXUSDT', 'SOLUSDT', 'SPELLUSDT', 'STGUSDT', 'STMXUSDT',
-    'STORJUSDT', 'STXUSDT', 'SUNUSDT', 'SUSHIUSDT', 'SWEATUSDT', 'SXPUSDT', 'THETAUSDT', 'TLMUSDT', 'TOMOUSDT',
-    'TRBUSDT', 'TRXUSDT', 'TWTUSDT', 'UNFIUSDT', 'UNIUSDT', 'USDCUSDT', 'VETUSDT', 'WAVESUSDT', 'WOOUSDT',
-    'XCNUSDT', 'XEMUSDT', 'XLMUSDT', 'XMRUSDT', 'XNOUSDT', 'XRPUSDT', 'XTZUSDT', 'YFIUSDT', 'YGGUSDT',
-    'ZECUSDT', 'ZENUSDT', 'ZILUSDT', 'ZRXUSDT'
-]
-
 ACCOUNT_TYPE_UNIFIED = 'UNIFIED'
 ACCOUNT_TYPE_CONTRACT = 'CONTRACT'
 ACCOUNT_TYPE_COPY_TRADING = 'COPYTRADING'
@@ -468,13 +443,11 @@ class ByBit:
             subscribe_to_tickers: bool = False,
             subscribe_to_private_feed: bool = True,
             orderbook_depth: int = 50,
-            account_type: str = ACCOUNT_TYPE_UNIFIED,
             use_v3: bool = False,
             category: str = 'linear',
             base_url: str = "https://api.bybit.com",
             timeout: int = 3,
     ):
-        self.account_type = account_type
         self.credentials = credentials
         self.rest = ByBitRest.from_credentials_file(
             self.credentials, category=category,
@@ -487,7 +460,7 @@ class ByBit:
         self.public_feed = None
         if self.subscribe_to_order_books or self.subscribe_to_tickers:
             self.public_feed = ByBitStream(
-                credentials=None, use_v3=use_v3,
+                credentials=None, use_v3=use_v3, category=category,
                 subscribe_to_order_books=self.subscribe_to_order_books,
                 subscribe_to_tickers=self.subscribe_to_tickers,
                 orderbook_depth=self.orderbook_depth,
@@ -533,7 +506,10 @@ class ByBit:
 
     def get_tickers(self, symbol: Optional[str] = None, **kwargs):
         if self.subscribe_to_tickers:
+            self.public_feed.subscribe_to_ticker(symbol)
             tickers = dict(self.public_feed.ticker_handler.tickers)
+            if symbol not in tickers:
+                tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
         else:
             tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
         for t in tickers.values():
@@ -824,11 +800,9 @@ class ByBitRest:
             api_key: Optional[str] = None,
             api_secret: Optional[str] = None,
             timeout: int = 2,
-            account_type: str = ACCOUNT_TYPE_UNIFIED,
             use_v3: bool = False,
             category: str = 'linear'
     ) -> None:
-        self.account_type = account_type
         self.use_v3 = use_v3
         self.timeout = timeout
         self.category = category
@@ -842,12 +816,12 @@ class ByBitRest:
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window = str(5000)
-        self._symbols = self.query_symbols_v2()
-        self.step_sizes = {s['name']: float(s['lot_size_filter']['qty_step']) for s in self._symbols}
-        self.min_quantities = {s['name']: float(s['lot_size_filter']['min_trading_qty']) for s in self._symbols}
+        self._symbols = self._get_instruments_info()
+        self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['qtyStep']) for s in self._symbols}
+        self.min_quantities = {s['symbol']: float(s['lotSizeFilter']['minOrderQty']) for s in self._symbols}
         # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-ipratelimits
-        self.tick_prices = {s['name']: float(s['price_filter']['tick_size']) for s in self._symbols}
-        # Why? Modify requires the symbol but we can cache it during place_order.
+        self.tick_prices = {s['symbol']: float(s['priceFilter']['tickSize']) for s in self._symbols}
+        # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
 
@@ -899,8 +873,6 @@ class ByBitRest:
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
         # self.throttler.submit_and_wait()
-        if not self.use_v3:
-            params.update({'accountType': self.account_type})
         req = self._retry_on_error(self._request, method='GET', path=path, params=params)
         return self._post_processing(req, pagination=pagination)
 
@@ -996,10 +968,15 @@ class ByBitRest:
         path = '/unified/v3/private/order/unfilled-orders' if self.use_v3 else '/v5/order/realtime'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
 
-    def get_balances(self, **kwargs) -> List[dict]:
+    def get_balances(self, **kwargs) -> dict:
         params = dict(kwargs)
         path = '/unified/v3/private/account/wallet/balance' if self.use_v3 else '/v5/account/wallet-balance'
-        return self._get(path, params=params)
+        if not self.use_v3:
+            return {
+                at: self._get(path, params={**params, **{'accountType': at}}) for at in
+                [ACCOUNT_TYPE_UNIFIED, ACCOUNT_TYPE_CONTRACT]
+            }
+        return {ACCOUNT_TYPE_UNIFIED: self._get(path, params=params)}
 
     def query_symbols_v2(self, **kwargs) -> List[dict]:
         params = dict(kwargs)
@@ -1266,7 +1243,6 @@ class ByBitRest:
             params=params
         )
 
-
 class ByBitStream:
 
     def __init__(
@@ -1339,6 +1315,7 @@ class ByBitStream:
         self.position_handler = ByBitPositions()
         self.execution_handler = ByBitExecutions()
         self.order_book_symbols = set()
+        self.tickers_symbols = set()
         self.ws = None
         self._ready = False
         self._conn_ws()
@@ -1373,7 +1350,6 @@ class ByBitStream:
             if 'op' in data and data['op'] == 'subscribe':
                 if data['success']:
                     logger.info(f'Subscription successful. Connection ID is {data["conn_id"]}.')
-                    self._ready = True
                     return
                 else:
                     raise Exception('Could not subscribe.')
@@ -1385,7 +1361,6 @@ class ByBitStream:
                     raise Exception('Could not authenticate.')
             if 'type' in data and data['type'] == 'COMMAND_RESP':
                 logger.info('Command response received.')
-                self._ready = True
                 return
 
             if 'op' in data and data['op'] == 'auth':
@@ -1460,25 +1435,23 @@ class ByBitStream:
             logger.debug('Auth.')
             self.send_auth(ws)
             topics = self.private_topics
-        else:
-            if self.rest_api is not None:
-                perp_list = [a['symbol'] for a in self.rest_api.fetch_perp_markets()]
-            else:
-                perp_list = PERP_LIST
-
-            # The order book subscriptions are made on a case by case basis.
-            if self.subscribe_to_tickers:
-                ticker_topics = [f'tickers.{p}' for p in perp_list]
-                logger.info('Subscribing to tickers.')
-                topics.extend(ticker_topics)
         self.subscribe(topics)
+        self._ready = True
+
+    def subscribe_to_ticker(self, symbol: str):
+        if symbol not in self.tickers_symbols:
+            self.tickers_symbols.add(symbol)
+            self.subscribe([f'tickers.{symbol}'])
 
     def subscribe_to_orderbook(self, symbol: str, depth: Optional[int] = None):
         depth = depth if depth is not None else self.orderbook_depth
         if symbol not in self.order_book_symbols:
+            self.order_book_symbols.add(symbol)
             self.subscribe([f'orderbook.{depth}.{symbol}'])
 
     def subscribe(self, topics: List[str]):
+        if len(topics) == 0:
+            return
         topics_str = ",".join(topics)
         if len(topics) > 100:
             topics_str = topics_str[0:40] + ' [ -> ] ' + topics_str[-40:] + ' (ALL)'
