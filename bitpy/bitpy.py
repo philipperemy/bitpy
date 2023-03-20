@@ -500,7 +500,7 @@ class ByBit:
             client_id: Optional[str] = None,
             **kwargs
     ) -> List[dict]:
-        return self.rest.get_orders(symbol, order_id, client_id, **kwargs)
+        return self.rest.get_orders(symbol=symbol, order_id=order_id, client_id=client_id, **kwargs)
 
     def get_open_orders(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         return self.rest.get_open_orders(symbol, **kwargs)
@@ -593,14 +593,30 @@ class ByBit:
 
     def get_trade_history(
             self,
-            currency: Optional[str] = None,
             start_date: Optional[datetime] = None,
             end_date: Optional[datetime] = None,
             **kwargs
     ) -> List[dict]:
+        if start_date is None:
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=7)
         start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
         end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
-        return self.rest.get_trade_history(currency=currency, startTime=start_time, endTime=end_time, **kwargs)
+        return self.rest.get_trade_history(startTime=start_time, endTime=end_time, **kwargs)
+
+    def get_funding_history(
+            self,
+            symbol: str,
+            start_date: Optional[datetime] = None,
+            end_date: Optional[datetime] = None,
+            **kwargs
+    ) -> List[dict]:
+        if start_date is None:
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=7)
+        start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        return self.rest.get_funding_history(symbol=symbol, startTime=start_time, endTime=end_time, **kwargs)
 
 
 class TimeInForce(Enum):
@@ -991,8 +1007,20 @@ class ByBitRest:
         path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params, max_records=max_records)
 
-    def get_open_orders(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
+    def get_open_orders(self, symbol: Optional[str] = None, settle_coin: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
+        if symbol is None and settle_coin is None:
+            if self.category in {'linear', 'inverse'}:
+                open_orders = []
+                if self.category == 'linear':
+                    settle_coins = {'USDT', 'USDC'}
+                else:  # inverse.
+                    settle_coins = set([a['settleCoin'] for a in self.symbols])
+                for settle_coin in settle_coins:
+                    open_orders.extend(self.get_open_orders(settle_coin=settle_coin))
+                return open_orders
+        else:
+            params.update({'settleCoin': settle_coin})
         params.update(kwargs)
         path = '/unified/v3/private/order/unfilled-orders' if self.use_v3 else '/v5/order/realtime'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
@@ -1249,18 +1277,9 @@ class ByBitRest:
     def fetch_perp_markets(self, **kwargs) -> List[Dict]:
         return [a for a in self.get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
 
-    def get_trade_history(
-            self,
-            currency: Optional[str] = None,
-            **kwargs
-    ) -> List[dict]:
+    def get_trade_history(self, **kwargs) -> List[dict]:
         path = '/unified/v3/private/account/transaction-log' if self.use_v3 else '/v5/account/transaction-log'
-        if currency is None:
-            currency = 'USDT'
-        params = {
-            'category': self.category,
-            'currency': currency,
-        }
+        params = {'category': self.category}
         params.update(kwargs)
         return self._paginate(call=self._get, unique_key='tradeId', path=path, params=params)
 
@@ -1278,6 +1297,12 @@ class ByBitRest:
         return self._paginate(
             call=self._get, unique_key='execId', path=path, params=params, max_records=max_records
         )
+
+    def get_funding_history(self, symbol: str, **kwargs):
+        params = {'category': self.category, 'symbol': symbol}
+        params.update(kwargs)
+        path = '/v5/market/funding/history'
+        return self._get(path=path, params=params)
 
 
 class ByBitStream:
