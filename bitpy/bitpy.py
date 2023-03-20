@@ -360,10 +360,10 @@ def download_public_trades(
 
 # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
 
-def _result_to_float_values(d: Union[List, dict]) -> Union[dict, List[float]]:
+def _result_to_float_values(d: Union[List, dict]) -> Union[List, dict, List[float]]:
     res = {}
     if isinstance(d, list):
-        return [float(a) for a in d]
+        return [_result_to_float_values(a) for a in d]
     for k, v in d.items():
         if isinstance(v, list):
             res[k] = [_result_to_float_values(a) for a in v]
@@ -371,7 +371,7 @@ def _result_to_float_values(d: Union[List, dict]) -> Union[dict, List[float]]:
             res[k] = _result_to_float_values(v)
         else:
             try:
-                if v is None:
+                if v is None or k in {'orderId', 'orderLinkId'}:
                     res[k] = v
                 else:
                     res[k] = float(v)
@@ -445,7 +445,7 @@ class ByBit:
             orderbook_depth: int = 50,
             use_v3: bool = False,
             category: str = 'linear',
-            base_url: str = "https://api.bybit.com",
+            base_url: str = 'https://api.bybit.com',
             timeout: int = 3,
     ):
         self.credentials = credentials
@@ -475,13 +475,14 @@ class ByBit:
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         if self.private_feed is not None:
-            positions = self.private_feed.position_handler.positions
-            if symbol is not None:
-                symbol_position = positions.get(symbol)
-                return [] if symbol_position is None else [symbol_position]
-            else:
-                list(positions.values())
-        return self.rest.get_positions(symbol, **kwargs)
+            results = self.private_feed.position_handler.positions
+            if results is None:
+                results = self.rest.get_positions(**kwargs)
+        else:
+            results = self.rest.get_positions(**kwargs)
+        if symbol is not None:
+            results = [a for a in results if a['symbol'] == symbol]
+        return results
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None) -> dict:
         if self.subscribe_to_order_books:
@@ -557,21 +558,21 @@ class ByBit:
 
     def cancel_order(
             self,
-            symbol: Optional[str] = None,
             order_id: Optional[str] = None,
             client_id: Optional[str] = None,
+            symbol: Optional[str] = None,
             **kwargs
     ):
-        return self.rest.cancel_order(symbol, order_id, client_id, **kwargs)
+        return self.rest.cancel_order(order_id=order_id, client_id=client_id, symbol=symbol, **kwargs)
 
     def cancel_all_orders(
             self,
             symbol: Optional[str] = None,
-            only_conditional_orders: bool = False,
-            only_limit_orders: bool = False,
             **kwargs
-    ) -> dict:
-        return self.rest.cancel_all_orders(symbol, only_conditional_orders, only_limit_orders, **kwargs)
+    ) -> List[dict]:
+        return self.rest.cancel_all_orders(
+            symbol=symbol, **kwargs
+        )
 
     def get_balances(self, **kwargs):
         return self.rest.get_balances(**kwargs)
@@ -581,9 +582,12 @@ class ByBit:
             symbol: Optional[str] = None,
             order_id: Optional[str] = None,
             client_id: Optional[str] = None,
+            use_websocket: bool = True,
             **kwargs
     ) -> List[dict]:
-        if self.private_feed is not None:
+        if not use_websocket:
+            return self.rest.get_executions(symbol, order_id, client_id, **kwargs)
+        elif self.private_feed is not None:
             return self.private_feed.execution_handler.get_executions(symbol, order_id, client_id)
         return self.rest.get_executions(symbol, order_id, client_id, **kwargs)
 
@@ -653,7 +657,9 @@ class ByBitExecutions:
     def on_message(self, msg: dict):
         data = msg['data']
         data = _result_to_float_values(data)
-        for result in data['result']:
+        if 'result' in data:
+            data = data['result']
+        for result in data:
             # {'symbol': 'ADAUSDT', 'side': 'Sell', 'orderId': 'a2c60728-8f5c-46e0-920b-e32952014448',
             # 'execId': '44aed711-5a9e-5d8c-bcdf-21ec3746065b', 'orderLinkId': '',
             # 'execPrice': '0.33020000', 'orderQty': '1.0000', 'execType': 'TRADE',
@@ -673,12 +679,16 @@ class ByBitExecutions:
 
 class ByBitPositions:
     def __init__(self):
-        self.positions = {}
+        self.positions = None
 
     def on_message(self, msg: dict):
+        if self.positions is None:
+            self.positions = {}  # init.
         data = msg['data']
         data = _result_to_float_values(data)
-        for result in data['result']:
+        if 'result' in data:
+            data = data['result']
+        for result in data:
             # {'positionIdx': 0, 'riskId': 1, 'symbol': 'BTCUSDT', 'side': 'None', 'size': '0.0000',
             # 'entryPrice': '0.00000000', 'leverage': '10', 'markPrice': '16851.50000000',
             # 'positionIM': '0.00000000', 'positionMM': '0.00000000', 'takeProfit': '',
@@ -703,7 +713,9 @@ class ByBitOrderStatuses:
     def on_message(self, msg: dict):
         data = msg['data']
         data = _result_to_float_values(data)
-        for result in data['result']:
+        if 'result' in data:
+            data = data['result']
+        for result in data:
             # {'orderId': 'e2b14fef-0332-4240-a884-8000cdae0c1e', 'orderLinkId': '', 'symbol': 'BTCUSDT',
             # 'side': 'Buy', 'orderType': 'Limit', 'price': '10000.00000000', 'qty': '0.0100',
             # 'timeInForce': 'PostOnly', 'orderStatus': 'New', 'cumExecQty': '0.0000',
@@ -721,9 +733,10 @@ class ByBitOrderStatuses:
             short_order_id = order_id.split('-')[-1]
             price = '<market>' if result['orderType'] == 'Market' else float(result["price"])
             logger.info(f'OrderStatus: {short_order_id} {result["orderStatus"]} '
-                        f'{result["side"]} {result["symbol"]} '
+                        f'{result["side"]} {result["category"]}:{result["symbol"]} '
                         f'{float(result["qty"])}@{price}, '
-                        f'CumExecQty={float(result["cumExecQty"])}, ReduceOnly={1 if result["reduceOnly"] else 0}.')
+                        f'CumExecQty={float(result["cumExecQty"])}, '
+                        f'ReduceOnly={1 if result["reduceOnly"] else 0}.')
 
 
 class ByBitTickers:
@@ -816,11 +829,14 @@ class ByBitRest:
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window = str(5000)
-        self._symbols = self._get_instruments_info()
-        self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['qtyStep']) for s in self._symbols}
-        self.min_quantities = {s['symbol']: float(s['lotSizeFilter']['minOrderQty']) for s in self._symbols}
+        self.symbols = self.get_instruments_info()
+        if self.category != 'spot':
+            self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['qtyStep']) for s in self.symbols}
+        else:
+            self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['basePrecision']) for s in self.symbols}
+        self.min_quantities = {s['symbol']: float(s['lotSizeFilter']['minOrderQty']) for s in self.symbols}
         # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-ipratelimits
-        self.tick_prices = {s['symbol']: float(s['priceFilter']['tickSize']) for s in self._symbols}
+        self.tick_prices = {s['symbol']: float(s['priceFilter']['tickSize']) for s in self.symbols}
         # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
@@ -944,23 +960,36 @@ class ByBitRest:
                     raise e(ret_msg)
             return data['result']
 
-    def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
-        params = {'category': self.category, 'symbol': symbol}
-        params.update(kwargs)
-        path = '/unified/v3/private/position/list' if self.use_v3 else '/v5/position/list'
-        return self._paginate(self._get, unique_key='symbol', path=path, params=params)
+    def get_positions(self, settle_coin: Optional[str] = None, **kwargs) -> List[dict]:
+        if self.category == 'spot':
+            raise ValueError('Spot does not have positions. Query the balance instead.')
+        if settle_coin is None and self.category in {'linear', 'inverse'}:
+            if self.category == 'linear':
+                settle_coins = {'USDT', 'USDC'}
+            else:  # inverse.
+                settle_coins = set([a['settleCoin'] for a in self.symbols])
+            positions = []
+            for settle_coin in settle_coins:
+                positions.extend(self.get_positions(settle_coin=settle_coin))
+            return positions
+        else:
+            params = {'category': self.category, 'settleCoin': settle_coin}
+            params.update(kwargs)
+            path = '/unified/v3/private/position/list' if self.use_v3 else '/v5/position/list'
+            return self._paginate(self._get, unique_key='symbol', path=path, params=params)
 
     def get_orders(
             self,
             symbol: Optional[str] = None,
             order_id: Optional[str] = None,
             client_id: Optional[str] = None,
+            max_records: int = 500,
             **kwargs
     ) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
         path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
-        return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
+        return self._paginate(call=self._get, unique_key='orderId', path=path, params=params, max_records=max_records)
 
     def get_open_orders(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
@@ -994,9 +1023,9 @@ class ByBitRest:
 
     def cancel_order(
             self,
-            symbol: Optional[str] = None,
             order_id: Optional[str] = None,
             client_id: Optional[str] = None,
+            symbol: Optional[str] = None,
             **kwargs
     ) -> dict:
         if client_id is None:
@@ -1033,29 +1062,31 @@ class ByBitRest:
     def cancel_all_orders(
             self,
             symbol: Optional[str] = None,
-            only_conditional_orders: bool = False,
-            only_limit_orders: bool = False,
+            settle_coin: Optional[str] = None,
             **kwargs
-    ) -> Optional[dict]:
-        order_filter = None
-        if only_conditional_orders:
-            order_filter = OrderFilter.STOP
-        elif only_limit_orders:
-            order_filter = OrderFilter.ORD
-        # if order_filter is not None and symbol is None:
-        #     raise ValueError('Symbol should be specified if only_limit_orders=True or only_conditional_orders=True')
-        params = {'category': self.category, 'symbol': symbol, 'orderFilter': order_filter}
-        if symbol is None:
+    ) -> List[dict]:
+        params = {'category': self.category, 'symbol': symbol}
+        if symbol is None and settle_coin is None:
+            if self.category in {'linear', 'inverse'}:
+                deleted_orders = []
+                if self.category == 'linear':
+                    settle_coins = {'USDT', 'USDC'}
+                else:  # inverse.
+                    settle_coins = set([a['settleCoin'] for a in self.symbols])
+                for settle_coin in settle_coins:
+                    deleted_orders.extend(self.cancel_all_orders(settle_coin=settle_coin))
+                return deleted_orders
+        else:
+            params.update({'settleCoin': settle_coin})
             # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/?console#t-dv_cancelallorders
             # Cancel all coins with quote = USDT.
-            params['settleCoin'] = 'USDT'
         params.update(kwargs)
         try:
             path = '/unified/v3/private/order/cancel-all' if self.use_v3 else '/v5/order/cancel-all'
             return self._post(path, params)
         except Exception as e:
             if str(e).lower() == 'cancel all no result':
-                return None
+                return []
             raise e
 
     def modify_order(
@@ -1067,6 +1098,9 @@ class ByBitRest:
             price: Optional[float] = None,
             **kwargs
     ) -> dict:
+        # https://bybit-exchange.github.io/docs/v5/order/amend-order
+        if self.category == 'spot':
+            raise ValueError('Spot market does not accept modify_order. Cancel the order and send a new order.')
         if client_id is None:
             assert order_id is not None
         symbol = self._resolve_symbol_from_cache(client_id, order_id, symbol)
@@ -1102,7 +1136,7 @@ class ByBitRest:
                 if client_id is not None:
                     symbol = self._cache_client_id_to_symbols[client_id]
             except Exception:
-                raise ValueError('Unknown order to modify. Please specify the symbol.')
+                raise ValueError('Unknown order. Please specify the symbol.')
         return symbol
 
     # noinspection PyShadowingBuiltins
@@ -1170,7 +1204,7 @@ class ByBitRest:
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
 
     @staticmethod
-    def _paginate(call: Callable, unique_key: str, path: str, params: Dict) -> List[Dict]:
+    def _paginate(call: Callable, unique_key: str, path: str, params: Dict, max_records: int = int(1e9)) -> List[Dict]:
         records = []
         keys = set()
         past_cursors = set()
@@ -1187,7 +1221,6 @@ class ByBitRest:
             results = call(path=path, params=params, pagination=True)
             if len(results) == 0:
                 break
-            cursor = results['nextPageCursor']
             old_key_count = len(keys)
             for result in results['list']:
                 if result[unique_key] not in keys:
@@ -1196,9 +1229,13 @@ class ByBitRest:
             new_key_count = len(keys)
             if new_key_count - old_key_count < 20:
                 break
+            cursor = results.get('nextPageCursor')
+            if len(records) >= max_records:
+                records = records[:max_records]
+                break
         return records
 
-    def _get_instruments_info(self, **kwargs) -> List[dict]:
+    def get_instruments_info(self, **kwargs) -> List[dict]:
         params = {'category': self.category}
         params.update(kwargs)
         path = '/derivatives/v3/public/instruments-info' if self.use_v3 else '/v5/market/instruments-info'
@@ -1210,7 +1247,7 @@ class ByBitRest:
         )
 
     def fetch_perp_markets(self, **kwargs) -> List[Dict]:
-        return [a for a in self._get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
+        return [a for a in self.get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
 
     def get_trade_history(
             self,
@@ -1232,19 +1269,21 @@ class ByBitRest:
             symbol: Optional[str] = None,
             order_id: Optional[str] = None,
             client_id: Optional[str] = None,
-            **kwargs):
+            max_records: int = 500,
+            **kwargs
+    ):
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
         path = '/unified/v3/private/execution/list' if self.use_v3 else '/v5/execution/list'
         return self._paginate(
-            self._get,
-            unique_key='execId',
-            path=path,
-            params=params
+            call=self._get, unique_key='execId', path=path, params=params, max_records=max_records
         )
 
 
 class ByBitStream:
+    TOPIC_ORDER = 'TOPIC_ORDER'
+    TOPIC_POSITION = 'TOPIC_POSITION'
+    TOPIC_EXECUTION = 'TOPIC_EXECUTION'
 
     def __init__(
             self,
@@ -1263,17 +1302,17 @@ class ByBitStream:
         self.rest_api = rest_api
         self.background = background
         if self.use_v3:
-            self.private_topics = [
-                'user.order.unifiedAccount',
-                'user.position.unifiedAccount',
-                'user.execution.unifiedAccount',
-            ]
+            self.private_topics = {
+                self.TOPIC_ORDER: 'user.order.unifiedAccount',
+                self.TOPIC_POSITION: 'user.position.unifiedAccount',
+                self.TOPIC_EXECUTION: 'user.execution.unifiedAccount'
+            }
         else:
-            self.private_topics = [
-                'order',
-                'position',
-                'execution',
-            ]
+            self.private_topics = {
+                self.TOPIC_ORDER: 'order',
+                self.TOPIC_POSITION: 'position',
+                self.TOPIC_EXECUTION: 'execution',
+            }
         self.private = private
         if credentials is not None:
             credentials = _read_credentials(Path(credentials).expanduser())
@@ -1375,12 +1414,14 @@ class ByBitStream:
                     self.orderbook_handler.on_message(data)
                 elif topic.startswith('tickers'):
                     self.ticker_handler.on_message(data)
-                elif topic == 'user.order.unifiedAccount':
+                elif topic == self.private_topics[self.TOPIC_ORDER]:
                     self.order_status_handler.on_message(data)
-                elif topic == 'user.position.unifiedAccount':
+                elif topic == self.private_topics[self.TOPIC_POSITION]:
                     self.position_handler.on_message(data)
-                elif topic == 'user.execution.unifiedAccount':
+                elif topic == self.private_topics[self.TOPIC_EXECUTION]:
                     self.execution_handler.on_message(data)
+                else:
+                    logger.warning(f'Unknown topic {data}.')
             else:
                 logger.info(f'FILTER: {data}')
         except Exception as e:
@@ -1435,7 +1476,7 @@ class ByBitStream:
         if self.private:
             logger.debug('Auth.')
             self.send_auth(ws)
-            topics = self.private_topics
+            topics = list(self.private_topics.values())
         self.subscribe(topics)
         self._ready = True
 
