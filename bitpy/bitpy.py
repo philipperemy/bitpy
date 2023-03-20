@@ -1243,6 +1243,7 @@ class ByBitRest:
             params=params
         )
 
+
 class ByBitStream:
 
     def __init__(
