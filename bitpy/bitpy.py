@@ -358,6 +358,12 @@ def download_public_trades(
     return records
 
 
+def _convert_ts(ts: float) -> datetime:
+    num_digits = len(str(int(ts)))
+    # time.time() has 10 digits.
+    return datetime.utcfromtimestamp(ts / 10 ** (num_digits - 10))
+
+
 # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
 
 def _result_to_float_values(d: Union[List, dict]) -> Union[List, dict, List[float]]:
@@ -591,6 +597,19 @@ class ByBit:
             return self.private_feed.execution_handler.get_executions(symbol, order_id, client_id)
         return self.rest.get_executions(symbol, order_id, client_id, **kwargs)
 
+    def get_private_funding_history(
+            self,
+            symbol: str,
+            start_date: Optional[datetime] = None,
+            end_date: Optional[datetime] = None,
+            **kwargs
+    ) -> pd.DataFrame:
+        trades = self.get_trade_history(start_date=start_date, end_date=end_date, **kwargs)
+        funding = pd.DataFrame([a for a in trades if a['funding'] != '' and a['symbol'] == symbol])
+        funding.set_index(funding['transactionTime'].apply(_convert_ts), inplace=True)
+        funding.sort_index(inplace=True)
+        return funding
+
     def get_trade_history(
             self,
             start_date: Optional[datetime] = None,
@@ -610,13 +629,20 @@ class ByBit:
             start_date: Optional[datetime] = None,
             end_date: Optional[datetime] = None,
             **kwargs
-    ) -> List[dict]:
+    ) -> pd.DataFrame:
         if start_date is None:
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=7)
         start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
         end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
-        return self.rest.get_funding_history(symbol=symbol, startTime=start_time, endTime=end_time, **kwargs)
+        history = pd.DataFrame(
+            self.rest.get_funding_history(symbol=symbol, startTime=start_time, endTime=end_time, **kwargs)
+        )
+        history.set_index(history['fundingRateTimestamp'].apply(_convert_ts), inplace=True)
+        history['fundingRatePct'] = history['fundingRate'] * 100
+        history.drop(['fundingRateTimestamp', 'fundingRate'], inplace=True, axis=1)
+        history.sort_index(inplace=True)
+        return history
 
 
 class TimeInForce(Enum):
