@@ -606,8 +606,9 @@ class ByBit:
     ) -> pd.DataFrame:
         trades = self.get_trade_history(start_date=start_date, end_date=end_date, **kwargs)
         funding = pd.DataFrame([a for a in trades if a['funding'] != '' and a['symbol'] == symbol])
-        funding.set_index(funding['transactionTime'].apply(_convert_ts), inplace=True)
-        funding.sort_index(inplace=True)
+        if len(funding) >= 0:
+            funding.set_index(funding['transactionTime'].apply(_convert_ts), inplace=True)
+            funding.sort_index(inplace=True)
         return funding
 
     def get_trade_history(
@@ -638,10 +639,11 @@ class ByBit:
         history = pd.DataFrame(
             self.rest.get_funding_history(symbol=symbol, startTime=start_time, endTime=end_time, **kwargs)
         )
-        history.set_index(history['fundingRateTimestamp'].apply(_convert_ts), inplace=True)
-        history['fundingRatePct'] = history['fundingRate'] * 100
-        history.drop(['fundingRateTimestamp', 'fundingRate'], inplace=True, axis=1)
-        history.sort_index(inplace=True)
+        if len(history) >= 0:
+            history.set_index(history['fundingRateTimestamp'].apply(_convert_ts), inplace=True)
+            history['fundingRatePct'] = history['fundingRate'] * 100
+            history.drop(['fundingRateTimestamp', 'fundingRate'], inplace=True, axis=1)
+            history.sort_index(inplace=True)
         return history
 
 
