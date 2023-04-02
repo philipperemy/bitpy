@@ -718,7 +718,7 @@ class ByBitExecutions:
             order_id = result['orderId']
             short_order_id = order_id.split('-')[-1]
             logger.info(f'Execution: {short_order_id} {result["execType"].title()} {result["side"]} '
-                        f'{result["symbol"]} {result["execQty"]}@{result["execPrice"]}')
+                        f'{result["symbol"]} {result["execQty"]}@{result["execPrice"]}.')
 
 
 class ByBitPositions:
@@ -880,7 +880,7 @@ class ByBitRest:
             self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['basePrecision']) for s in self.symbols}
         self.min_quantities = {s['symbol']: float(s['lotSizeFilter']['minOrderQty']) for s in self.symbols}
         # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-ipratelimits
-        self.tick_prices = {s['symbol']: float(s['priceFilter']['tickSize']) for s in self.symbols}
+        self.tick_sizes = {s['symbol']: float(s['priceFilter']['tickSize']) for s in self.symbols}
         # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
@@ -1070,7 +1070,7 @@ class ByBitRest:
     def _round(self, symbol: str, price: Optional[float] = None, size: Optional[float] = None) -> float:
         assert price is None or size is None
         if price is not None:
-            return round(_round_tick(price, self.tick_prices[symbol]), 8)
+            return round(_round_tick(price, self.tick_sizes[symbol]), 8)
         if size is not None:
             size_ = _round_tick(size, self.step_sizes[symbol])
             if size_ < self.min_quantities[symbol]:
