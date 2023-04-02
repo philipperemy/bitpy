@@ -518,7 +518,10 @@ class ByBit:
             if symbol not in tickers:
                 tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
         else:
-            tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
+            if symbol is not None:
+                tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
+            else:
+                tickers = {m['symbol']: m for m in self.rest.get_markets(symbol, **kwargs)}
         for t in tickers.values():
             t['bidPrice'] = t['bid1Price']
             t['askPrice'] = t['ask1Price']
