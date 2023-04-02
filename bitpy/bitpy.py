@@ -512,7 +512,7 @@ class ByBit:
         return self.rest.get_open_orders(symbol, **kwargs)
 
     def get_tickers(self, symbol: Optional[str] = None, **kwargs):
-        if self.subscribe_to_tickers:
+        if self.subscribe_to_tickers and symbol is not None:
             self.public_feed.subscribe_to_ticker(symbol)
             tickers = dict(self.public_feed.ticker_handler.tickers)
             if symbol not in tickers:
