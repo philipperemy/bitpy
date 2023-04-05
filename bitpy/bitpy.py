@@ -650,10 +650,17 @@ class ByBit:
         return history
 
 
-class TimeInForce(Enum):
+class TimeInForceV3(Enum):
     GTC = 'GoodTillCancel'
     IOC = 'ImmediateOrCancel'
     FOK = 'FillOrKill'
+    POS = 'PostOnly'
+
+
+class TimeInForce(Enum):
+    GTC = 'GTC'
+    IOC = 'IOC'
+    FOK = 'FOK'
     POS = 'PostOnly'
 
 
@@ -1223,9 +1230,9 @@ class ByBitRest:
         size = self._round(symbol, size=size)
         tif = None
         if ioc:
-            tif = TimeInForce.IOC
+            tif = TimeInForceV3.IOC if self.use_v3 else TimeInForce.IOC
         elif post_only:
-            tif = TimeInForce.POS
+            tif = TimeInForceV3.POS if self.use_v3 else TimeInForce.POS
         # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-dv_placeorder
         params = {
             'symbol': symbol,
