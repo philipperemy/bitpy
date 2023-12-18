@@ -15,6 +15,7 @@ from typing import Union
 from urllib.parse import urlencode
 
 import numpy as np
+import orjson
 import pandas as pd
 import requests
 import websocket
@@ -25,8 +26,6 @@ logger = logging.getLogger(__name__)
 
 logging.getLogger('websocket').setLevel(logging.ERROR)
 
-
-# https://bybit-exchange.github.io/docs/v5/upgrade-guide#v5-and-v3-interface-mapping-list
 
 class InsufficientFunds(Exception):
     pass
@@ -449,7 +448,6 @@ class ByBit:
             subscribe_to_tickers: bool = False,
             subscribe_to_private_feed: bool = True,
             orderbook_depth: int = 50,
-            use_v3: bool = False,
             category: str = 'linear',
             base_url: str = 'https://api.bybit.com',
             timeout: int = 3,
@@ -458,7 +456,6 @@ class ByBit:
         self.rest = ByBitRest.from_credentials_file(
             self.credentials, category=category,
             base_url=base_url, timeout=timeout,
-            use_v3=use_v3
         )
         self.subscribe_to_order_books = subscribe_to_order_books
         self.subscribe_to_tickers = subscribe_to_tickers
@@ -466,7 +463,7 @@ class ByBit:
         self.public_feed = None
         if self.subscribe_to_order_books or self.subscribe_to_tickers:
             self.public_feed = ByBitStream(
-                credentials=None, use_v3=use_v3, category=category,
+                credentials=None, category=category,
                 subscribe_to_order_books=self.subscribe_to_order_books,
                 subscribe_to_tickers=self.subscribe_to_tickers,
                 orderbook_depth=self.orderbook_depth,
@@ -476,7 +473,7 @@ class ByBit:
         self.private_feed = None
         if subscribe_to_private_feed and self.credentials is not None:
             self.private_feed = ByBitStream(
-                self.credentials, use_v3=use_v3, private=True, background=True, rest_api=self.rest
+                self.credentials, private=True, background=True, rest_api=self.rest
             )
 
     def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
@@ -784,13 +781,13 @@ class ByBitOrderStatuses:
                 self.order_statuses_order_id[order_id] = result
             if client_id is not None and client_id != '':
                 self.order_statuses_order_client_id[client_id] = result
-            short_order_id = order_id.split('-')[-1]
             price = '<market>' if result['orderType'] == 'Market' else float(result["price"])
-            logger.info(f'OrderStatus: {short_order_id} {result["orderStatus"]} '
+            logger.info(f'OrderStatus: {order_id} {result["orderStatus"]} '
                         f'{result["side"]} {result["category"]}:{result["symbol"]} '
                         f'{float(result["qty"])}@{price}, '
                         f'CumExecQty={float(result["cumExecQty"])}, '
-                        f'ReduceOnly={1 if result["reduceOnly"] else 0}.')
+                        f'ReduceOnly={1 if result["reduceOnly"] else 0}, '
+                        f'tif={result["timeInForce"]}.')
 
 
 class ByBitTickers:
@@ -801,7 +798,7 @@ class ByBitTickers:
     def on_message(self, msg: dict):
         data = msg['data']
         symbol = data['symbol']
-        data = _result_to_float_values(data)
+        data = _result_to_float_values(data)  # fast enough. 400ms per 100K.
         if symbol not in self.tickers or msg['type'] == 'snapshot':
             self.tickers[symbol] = data
         else:
@@ -867,10 +864,8 @@ class ByBitRest:
             api_key: Optional[str] = None,
             api_secret: Optional[str] = None,
             timeout: int = 2,
-            use_v3: bool = False,
             category: str = 'linear'
     ) -> None:
-        self.use_v3 = use_v3
         self.timeout = timeout
         self.category = category
         # self.throttler = ByBitThrottler()
@@ -903,11 +898,7 @@ class ByBitRest:
             credentials = _read_credentials(Path(credentials).expanduser())
             api_key = credentials['apiKey']
             api_secret = credentials['secret']
-        return cls(
-            api_key=api_key,
-            api_secret=api_secret,
-            **kwargs
-        )
+        return cls(api_key=api_key, api_secret=api_secret, **kwargs)
 
     @staticmethod
     def _post_processing(resp: Any, pagination: bool = False) -> Any:
@@ -1029,7 +1020,7 @@ class ByBitRest:
         else:
             params = {'category': self.category, 'settleCoin': settle_coin}
             params.update(kwargs)
-            path = '/unified/v3/private/position/list' if self.use_v3 else '/v5/position/list'
+            path = '/v5/position/list'
             return self._paginate(self._get, unique_key='symbol', path=path, params=params)
 
     def get_orders(
@@ -1042,7 +1033,7 @@ class ByBitRest:
     ) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
-        path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
+        path = '/v5/order/history'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params, max_records=max_records)
 
     def get_open_orders(self, symbol: Optional[str] = None, settle_coin: Optional[str] = None, **kwargs) -> List[dict]:
@@ -1060,18 +1051,16 @@ class ByBitRest:
         else:
             params.update({'settleCoin': settle_coin})
         params.update(kwargs)
-        path = '/unified/v3/private/order/unfilled-orders' if self.use_v3 else '/v5/order/realtime'
+        path = '/v5/order/realtime'
         return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
 
     def get_balances(self, **kwargs) -> dict:
         params = dict(kwargs)
-        path = '/unified/v3/private/account/wallet/balance' if self.use_v3 else '/v5/account/wallet-balance'
-        if not self.use_v3:
-            return {
-                at: self._get(path, params={**params, **{'accountType': at}}) for at in
-                [ACCOUNT_TYPE_UNIFIED, ACCOUNT_TYPE_CONTRACT]
-            }
-        return {ACCOUNT_TYPE_UNIFIED: self._get(path, params=params)}
+        path = '/v5/account/wallet-balance'
+        return {
+            at: self._get(path, params={**params, **{'accountType': at}}) for at in
+            [ACCOUNT_TYPE_UNIFIED, ACCOUNT_TYPE_CONTRACT]
+        }
 
     def query_symbols_v2(self, **kwargs) -> List[dict]:
         params = dict(kwargs)
@@ -1099,13 +1088,13 @@ class ByBitRest:
         symbol = self._resolve_symbol_from_cache(client_id, order_id, symbol)
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
-        path = '/unified/v3/private/order/cancel' if self.use_v3 else '/v5/order/cancel'
+        path = '/v5/order/cancel'
         return self._post(path, params)
 
     def get_markets(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
-        path = '/derivatives/v3/public/tickers' if self.use_v3 else '/v5/market/tickers'
+        path = '/v5/market/tickers'
         return self._get(path, params)
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None, **kwargs) -> dict:
@@ -1116,7 +1105,7 @@ class ByBitRest:
                 depth = 1
         params = {'category': self.category, 'symbol': symbol, 'limit': depth}
         params.update(kwargs)
-        path = '/derivatives/v3/public/order-book/L2' if self.use_v3 else '/v5/market/orderbook'
+        path = '/v5/market/orderbook'
         ob = self._get(path, params)
         ob['bids'] = list(reversed([[float(t[0]), float(t[1])] for t in ob['b']]))
         ob['asks'] = [[float(t[0]), float(t[1])] for t in ob['a']]
@@ -1148,7 +1137,7 @@ class ByBitRest:
             # Cancel all coins with quote = USDT.
         params.update(kwargs)
         try:
-            path = '/unified/v3/private/order/cancel-all' if self.use_v3 else '/v5/order/cancel-all'
+            path = '/v5/order/cancel-all'
             return self._post(path, params)
         except Exception as e:
             if str(e).lower() == 'cancel all no result':
@@ -1165,8 +1154,6 @@ class ByBitRest:
             **kwargs
     ) -> dict:
         # https://bybit-exchange.github.io/docs/v5/order/amend-order
-        if self.category == 'spot':
-            raise ValueError('Spot market does not accept modify_order. Cancel the order and send a new order.')
         if client_id is None:
             assert order_id is not None
         symbol = self._resolve_symbol_from_cache(client_id, order_id, symbol)
@@ -1183,7 +1170,7 @@ class ByBitRest:
         params.update(kwargs)
         if client_id is None:
             assert order_id is not None
-        path = '/unified/v3/private/order/replace' if self.use_v3 else '/v5/order/amend'
+        path = '/v5/order/amend'
         return self._post(
             path=path,
             params=params
@@ -1230,10 +1217,10 @@ class ByBitRest:
         size = self._round(symbol, size=size)
         tif = None
         if ioc:
-            tif = TimeInForceV3.IOC if self.use_v3 else TimeInForce.IOC
+            tif = TimeInForce.IOC
         elif post_only:
-            tif = TimeInForceV3.POS if self.use_v3 else TimeInForce.POS
-        # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-dv_placeorder
+            tif = TimeInForce.POS
+            # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin/#t-dv_placeorder
         params = {
             'symbol': symbol,
             'orderType': type_.title(),
@@ -1246,7 +1233,7 @@ class ByBitRest:
             'timeInForce': tif,
         }
         params.update(kwargs)
-        path = '/unified/v3/private/order/create' if self.use_v3 else '/v5/order/create'
+        path = '/v5/order/create'
         resp = self._post(path=path, params=params)
         order_id = resp.get('orderId')
         client_id = resp.get('orderLinkId')
@@ -1261,7 +1248,7 @@ class ByBitRest:
             symbol: Optional[str] = None,
             **kwargs
     ) -> List[dict]:
-        path = '/unified/v3/private/order/list' if self.use_v3 else '/v5/order/history'
+        path = '/v5/order/history'
         params = {
             'category': self.category,
             'symbol': symbol,
@@ -1276,7 +1263,7 @@ class ByBitRest:
         past_cursors = set()
         cursor = None
         first_step = True
-        params['limit'] = '1000'  # pagination limit.
+        params['limit'] = '100'  # pagination limit.
         while first_step or cursor is not None:
             first_step = False
             params['cursor'] = cursor
@@ -1304,7 +1291,7 @@ class ByBitRest:
     def get_instruments_info(self, **kwargs) -> List[dict]:
         params = {'category': self.category}
         params.update(kwargs)
-        path = '/derivatives/v3/public/instruments-info' if self.use_v3 else '/v5/market/instruments-info'
+        path = '/v5/market/instruments-info'
         return self._paginate(
             self._get,
             unique_key='symbol',
@@ -1316,7 +1303,7 @@ class ByBitRest:
         return [a for a in self.get_instruments_info(**kwargs) if a['quoteCoin'] == 'USDT']
 
     def get_trade_history(self, **kwargs) -> List[dict]:
-        path = '/unified/v3/private/account/transaction-log' if self.use_v3 else '/v5/account/transaction-log'
+        path = '/v5/account/transaction-log'
         params = {'category': self.category}
         params.update(kwargs)
         return self._paginate(call=self._get, unique_key='tradeId', path=path, params=params)
@@ -1331,7 +1318,7 @@ class ByBitRest:
     ):
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
-        path = '/unified/v3/private/execution/list' if self.use_v3 else '/v5/execution/list'
+        path = '/v5/execution/list'
         return self._paginate(
             call=self._get, unique_key='execId', path=path, params=params, max_records=max_records
         )
@@ -1355,27 +1342,18 @@ class ByBitStream:
             subscribe_to_tickers: bool = True,
             orderbook_depth: int = 50,
             private: bool = False,
-            use_v3: bool = False,
             category: str = 'linear',
             background: bool = False,
             print_stats_every: int = 600,
             rest_api: Optional[ByBitRest] = None
     ):
-        self.use_v3 = use_v3
         self.rest_api = rest_api
         self.background = background
-        if self.use_v3:
-            self.private_topics = {
-                self.TOPIC_ORDER: 'user.order.unifiedAccount',
-                self.TOPIC_POSITION: 'user.position.unifiedAccount',
-                self.TOPIC_EXECUTION: 'user.execution.unifiedAccount'
-            }
-        else:
-            self.private_topics = {
-                self.TOPIC_ORDER: 'order',
-                self.TOPIC_POSITION: 'position',
-                self.TOPIC_EXECUTION: 'execution',
-            }
+        self.private_topics = {
+            self.TOPIC_ORDER: 'order',
+            self.TOPIC_POSITION: 'position',
+            self.TOPIC_EXECUTION: 'execution',
+        }
         self.private = private
         if credentials is not None:
             credentials = _read_credentials(Path(credentials).expanduser())
@@ -1384,18 +1362,12 @@ class ByBitStream:
         else:
             self.api_key = None
             self.api_secret = None
-        if use_v3:
-            if self.private:
-                self.url = 'wss://stream.bybit.com/unified/private/v3'
-            else:
-                self.url = 'wss://stream.bybit.com/contract/usdt/public/v3'
-        else:  # v5.
-            if self.private:
-                self.url = 'wss://stream.bybit.com/v5/private'
-            else:
-                self.url = f'wss://stream.bybit.com/v5/public/{category}'
+        if self.private:
+            self.url = 'wss://stream.bybit.com/v5/private'
+        else:
+            self.url = f'wss://stream.bybit.com/v5/public/{category}'
         logger.info(f'URL: {self.url}.')
-        bybit_time = float(requests.get('https://api.bybit.com/v2/public/time').json()['time_now'])
+        bybit_time = float(requests.get('https://api.bybit.com/v5/market/time').json()['result']['timeNano']) / 1e9
         our_time = time.time()
         self.latency_offset = bybit_time - our_time
         logger.info(f'Latency offset is {self.latency_offset} seconds (adjusted).')
@@ -1404,11 +1376,8 @@ class ByBitStream:
         self._last_debug_ts = None
         self.print_status_every = print_stats_every
         self.latency_per_sub = defaultdict(list)
-        if self.use_v3:
-            assert orderbook_depth in [1, 25, 50, 100, 200, 500]
-        else:
-            # https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook
-            assert orderbook_depth in [1, 50, 200, 500]
+        # https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook
+        assert orderbook_depth in [1, 50, 200, 500]
         self.subscribe_to_order_books = subscribe_to_order_books
         self.subscribe_to_tickers = subscribe_to_tickers
         self.orderbook_depth = orderbook_depth
@@ -1432,7 +1401,6 @@ class ByBitStream:
         secret = self.api_secret
         expires = int((time.time() + 10) * 1000)
         _val = f'GET/realtime{expires}'
-        # print(_val)
         signature = str(hmac.new(
             bytes(secret, 'utf-8'),
             bytes(_val, 'utf-8'), digestmod='sha256'
@@ -1445,8 +1413,7 @@ class ByBitStream:
 
     # noinspection PyUnusedLocal
     def _on_message(self, ws, message):
-        logger.debug(message)
-        data = json.loads(message)
+        data = orjson.loads(message)
         try:
             # https://api.bybit.com/v2/public/time
             # https://bybit-exchange.github.io/docs/futuresV2/inverse/#t-api
@@ -1465,11 +1432,9 @@ class ByBitStream:
             if 'type' in data and data['type'] == 'COMMAND_RESP':
                 logger.info('Command response received.')
                 return
-
             if 'op' in data and data['op'] == 'auth':
                 logger.info(f'Authenticated. Connection ID is {data["conn_id"]}.')
                 return
-
             if 'topic' in data:
                 topic = data['topic']
                 self._print_stats(data, topic)
