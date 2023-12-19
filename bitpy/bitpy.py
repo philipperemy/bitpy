@@ -513,12 +513,13 @@ class ByBit:
             finally:
                 time.sleep(1.0)
 
-    def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[Dict]:
+    def get_positions(self, symbol: Optional[str] = None, use_rest: bool = True, **kwargs) -> List[Dict]:
+        # Dangerous function if used with websocket.
 
         def rest():
             return self.rest.get_positions(**kwargs)
 
-        if self.private_feed is not None:
+        if self.private_feed is not None and not use_rest:
             results = list(self.private_feed.position_handler.get_positions().values())
         else:
             results = rest()
