@@ -5,22 +5,19 @@ import logging
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from queue import Queue, Empty
 from typing import Optional, Dict, Any, List, Callable
 from typing import Union
 from urllib.parse import urlencode
 
-import numpy as np
 import orjson
 import pandas as pd
 import requests
 import websocket
 from requests import Session, Response
-from urllib3 import HTTPSConnectionPool
 
 logger = logging.getLogger(__name__)
 
@@ -357,10 +354,16 @@ def download_public_trades(
     return records
 
 
-def _convert_ts(ts: float) -> datetime:
+def _convert_ts_to_datetime(ts: float) -> datetime:
     num_digits = len(str(int(ts)))
     # time.time() has 10 digits.
     return datetime.utcfromtimestamp(ts / 10 ** (num_digits - 10))
+
+
+def _convert_ts(ts: float) -> float:
+    num_digits = len(str(int(ts)))
+    # time.time() has 10 digits.
+    return ts / 10 ** (num_digits - 10)
 
 
 # https://bybit-exchange.github.io/docs/derivativesV3/unified_margin
@@ -385,30 +388,47 @@ def _result_to_float_values(d: Union[List, dict]) -> Union[List, dict, List[floa
     return res
 
 
-class ByBitThrottler:
+class ThrottlerFast:
+    delays = deque(maxlen=1000)
 
-    def __init__(self, waiting_time=0.02):  # 50 requests / second.
-        self.requests = Queue()
-        self.responses = Queue()
-        self.waiting_time = waiting_time
-        _runs_in_a_thread(self._run, name='Throttle')
+    def __init__(self, max_num_requests=30, every=3, name=''):
+        # rules: global. https://www.kucoin.com/news/en-adjustment-of-the-spot-and-futures-api-request-limit.
+        # - global: no more than 30 orders per 3s.
+        self.max_num_requests = max_num_requests
+        self.key = '[throttle]' + f'[{name}]' if len(name) > 0 else ''
+        self.every = every
+        self.times = deque(maxlen=self.max_num_requests + 1)
+        self.lock = threading.Lock()
 
-    def _run(self):
-        while True:
-            try:
-                self.requests.get_nowait()
-                time.sleep(self.waiting_time)
-            except Empty:
-                time.sleep(0.001)
+    def check_rule_and_wait(self, times, max_num_requests, every):
+        now = time.time()
+        cutoff_time = now - every
+        orders = [a for a in times if a >= cutoff_time]
+        if len(orders) >= max(max_num_requests - 1, 1):  # -1 to be safe.
+            # min time to wait for an order to be pushed out of the buffer.
+            time_to_wait = min([o - cutoff_time + 0.01 for o in orders])
+            logger.info(f'{self.key} Wait {time_to_wait:.3f} seconds.')
+            assert time_to_wait >= 0
+            time.sleep(time_to_wait)
 
-    def submit_and_wait(self):
+    def _execute(self):
+        with self.lock:
+            self.check_rule_and_wait(self.times, max_num_requests=self.max_num_requests, every=self.every)
+        self.times.append(time.time())
+
+    def submit(self, log_entry: bool = False):
         req_time = time.time()
-        self.requests.put('req')
-        self.responses.get()
+        log = logger.info if log_entry else logger.debug
+        log(f'{self.key} Submit request.')
+        self._execute()
         resp_time = time.time()
         delay = resp_time - req_time
         if delay > 0.2:
-            logger.warning(f'Throttling delay detected: {int(delay * 1000)} ms.')
+            # fills -> we don't really care to see it in the logs. The API is so slow for them.
+            log_func = logger.warning if self.key != '[throttle][fills]' else logger.debug
+            log_func(f'{self.key} Small delay: {int(delay * 1000)} ms.')
+            self.delays.append({'time': time.time(), 'delay': delay})
+        log(f'{self.key} Response received.')
 
 
 def _runs_in_a_thread(func, name=None, args=()):
@@ -451,11 +471,13 @@ class ByBit:
             category: str = 'linear',
             base_url: str = 'https://api.bybit.com',
             timeout: int = 3,
+            retries: int = 1
     ):
         self.credentials = credentials
         self.rest = ByBitRest.from_credentials_file(
             self.credentials, category=category,
             base_url=base_url, timeout=timeout,
+            retries=retries
         )
         self.subscribe_to_order_books = subscribe_to_order_books
         self.subscribe_to_tickers = subscribe_to_tickers
@@ -468,21 +490,38 @@ class ByBit:
                 subscribe_to_tickers=self.subscribe_to_tickers,
                 orderbook_depth=self.orderbook_depth,
                 private=False, background=True,
-                rest_api=self.rest
             )
         self.private_feed = None
         if subscribe_to_private_feed and self.credentials is not None:
             self.private_feed = ByBitStream(
-                self.credentials, private=True, background=True, rest_api=self.rest
+                self.credentials, private=True, background=True
             )
+        self._rest_tickers = self.fetch_rest_tickers()
+        self.rest_tickers_last_time = time.time()
+        _runs_in_a_thread(self._run_fetch_rest_tickers_forever, name='RestTicker')
 
-    def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
+    def fetch_rest_tickers(self) -> Dict[str, Dict]:
+        return {m['symbol']: m for m in self.rest.get_markets()}
+
+    def _run_fetch_rest_tickers_forever(self):
+        while True:
+            try:
+                self._rest_tickers = self.fetch_rest_tickers()
+                self.rest_tickers_last_time = time.time()
+            except Exception as e:
+                logger.warning(f'_run_fetch_rest_tickers_forever: {str(e)}.')
+            finally:
+                time.sleep(1.0)
+
+    def get_positions(self, symbol: Optional[str] = None, **kwargs) -> List[Dict]:
+
+        def rest():
+            return self.rest.get_positions(**kwargs)
+
         if self.private_feed is not None:
-            results = self.private_feed.position_handler.positions
-            if results is None:
-                results = self.rest.get_positions(**kwargs)
+            results = list(self.private_feed.position_handler.get_positions().values())
         else:
-            results = self.rest.get_positions(**kwargs)
+            results = rest()
         if symbol is not None:
             results = [a for a in results if a['symbol'] == symbol]
         return results
@@ -508,21 +547,20 @@ class ByBit:
     def get_open_orders(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         return self.rest.get_open_orders(symbol, **kwargs)
 
-    def get_tickers(self, symbol: Optional[str] = None, **kwargs):
-        if self.subscribe_to_tickers and symbol is not None:
-            self.public_feed.subscribe_to_ticker(symbol)
-            tickers = dict(self.public_feed.ticker_handler.tickers)
-            if symbol not in tickers:
-                tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
-        else:
+    def get_ticker(self, symbol: str) -> Dict:
+        return self.get_tickers(symbol)
+
+    def get_tickers(self, symbol: Optional[str] = None, force_use_rest: bool = False):
+        if self.subscribe_to_tickers and not force_use_rest:
             if symbol is not None:
-                tickers = {symbol: self.rest.get_markets(symbol, **kwargs)}
+                self.public_feed.subscribe_to_ticker(symbol)
+                return self.public_feed.ticker_handler.get_ticker(symbol)
             else:
-                tickers = {m['symbol']: m for m in self.rest.get_markets(symbol, **kwargs)}
-        for t in tickers.values():
-            t['bidPrice'] = t['bid1Price']
-            t['askPrice'] = t['ask1Price']
-        return tickers.get(symbol) if symbol is not None else tickers
+                return self.public_feed.ticker_handler.get_tickers()
+        else:  # REST.
+            if symbol is not None:
+                return self._rest_tickers[symbol]
+            return self._rest_tickers
 
     def get_order_status(
             self,
@@ -607,7 +645,7 @@ class ByBit:
         trades = self.get_trade_history(start_date=start_date, end_date=end_date, **kwargs)
         funding = pd.DataFrame([a for a in trades if a['funding'] != '' and a['symbol'] == symbol])
         if len(funding) >= 0:
-            funding.set_index(funding['transactionTime'].apply(_convert_ts), inplace=True)
+            funding.set_index(funding['transactionTime'].apply(_convert_ts_to_datetime), inplace=True)
             funding.sort_index(inplace=True)
         return funding
 
@@ -640,7 +678,7 @@ class ByBit:
             self.rest.get_funding_history(symbol=symbol, startTime=start_time, endTime=end_time, **kwargs)
         )
         if len(history) >= 0:
-            history.set_index(history['fundingRateTimestamp'].apply(_convert_ts), inplace=True)
+            history.set_index(history['fundingRateTimestamp'].apply(_convert_ts_to_datetime), inplace=True)
             history['fundingRatePct'] = history['fundingRate'] * 100
             history.drop(['fundingRateTimestamp', 'fundingRate'], inplace=True, axis=1)
             history.sort_index(inplace=True)
@@ -728,9 +766,12 @@ class ByBitExecutions:
                         f'{result["symbol"]} {result["execQty"]}@{result["execPrice"]}.')
 
 
-class ByBitPositions:
+class ByBitRealTimePositions:
     def __init__(self):
-        self.positions = None
+        self.positions = {}
+
+    def get_positions(self):
+        return {a: b for a, b in self.positions.items() if b['size'] != 0.0}
 
     def on_message(self, msg: dict):
         if self.positions is None:
@@ -750,7 +791,7 @@ class ByBitPositions:
             self.positions[result['symbol']] = result
 
 
-class ByBitOrderStatuses:
+class ByBitRealTimeOrderStatuses:
     def __init__(self):
         self.order_statuses_order_id = {}
         self.order_statuses_order_client_id = {}
@@ -782,15 +823,14 @@ class ByBitOrderStatuses:
             if client_id is not None and client_id != '':
                 self.order_statuses_order_client_id[client_id] = result
             price = '<market>' if result['orderType'] == 'Market' else float(result["price"])
-            logger.info(f'OrderStatus: {order_id} {result["orderStatus"]} '
-                        f'{result["side"]} {result["category"]}:{result["symbol"]} '
+            logger.info(f'OrdStatus: {order_id[-8:]} {result["orderStatus"].lower()} '
+                        f'{result["side"].lower()} {result["symbol"]} '
                         f'{float(result["qty"])}@{price}, '
-                        f'CumExecQty={float(result["cumExecQty"])}, '
                         f'ReduceOnly={1 if result["reduceOnly"] else 0}, '
                         f'tif={result["timeInForce"]}.')
 
 
-class ByBitTickers:
+class ByBitRealTimeTickers:
 
     def __init__(self):
         self.tickers = {}
@@ -799,10 +839,23 @@ class ByBitTickers:
         data = msg['data']
         symbol = data['symbol']
         data = _result_to_float_values(data)  # fast enough. 400ms per 100K.
+        data['ts_us'] = time.time()
+        data['ts'] = _convert_ts(msg['ts'])
         if symbol not in self.tickers or msg['type'] == 'snapshot':
             self.tickers[symbol] = data
         else:
             self.tickers[symbol].update(data)
+
+    def get_tickers(self):
+        return dict(self.tickers)
+
+    def get_ticker(self, symbol: str, wait: float = 10.0) -> Dict:
+        end = time.time() + wait
+        while time.time() < end:
+            tickers = self.get_tickers()
+            if symbol in tickers:
+                return tickers[symbol]
+            time.sleep(0.1)
 
     def get_mid(self, symbol: str) -> Optional[float]:
         if symbol in self.tickers:
@@ -864,11 +917,12 @@ class ByBitRest:
             api_key: Optional[str] = None,
             api_secret: Optional[str] = None,
             timeout: int = 2,
+            retries: int = 1,
             category: str = 'linear'
     ) -> None:
         self.timeout = timeout
+        self.retries = retries
         self.category = category
-        # self.throttler = ByBitThrottler()
         self._session = Session()
         self._base_url = base_url
         if api_key is None:
@@ -878,6 +932,18 @@ class ByBitRest:
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window = str(5000)
+        self.throttler_order_create = ThrottlerFast(10, 1, 'order_create')
+        self.throttler_order_amend = ThrottlerFast(10, 1, 'order_amend')
+        self.throttler_order_cancel = ThrottlerFast(10, 1, 'order_cancel')
+        self.throttler_order_all_cancel = ThrottlerFast(10, 1, 'order_all_cancel')
+        self.throttler_order_realtime = ThrottlerFast(50, 1, 'order_realtime')
+        self.throttler_positions_list = ThrottlerFast(50, 1, 'position_list')
+        self.throttler_executions_list = ThrottlerFast(50, 1, 'execution_list')
+        self.throttler_closed_pnl = ThrottlerFast(50, 1, 'closed_pnl')
+        self.throttler_wallet_balance = ThrottlerFast(50, 1, 'wallet_balance')
+        self.throttler_global = ThrottlerFast(120, 5, 'global')
+        self.throttler_transaction_log = ThrottlerFast(50, 1, 'transaction_log')
+        self.throttler_order_history = ThrottlerFast(50, 1, 'order_history')
         self.symbols = self.get_instruments_info()
         if self.category != 'spot':
             self.step_sizes = {s['symbol']: float(s['lotSizeFilter']['qtyStep']) for s in self.symbols}
@@ -889,6 +955,7 @@ class ByBitRest:
         # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
+        # https://bybit-exchange.github.io/docs/v5/rate-limit
 
     @classmethod
     def from_credentials_file(cls, credentials: Union[Path, str, None] = None, **kwargs):
@@ -914,32 +981,38 @@ class ByBitRest:
         return result
 
     @staticmethod
-    def _retry_on_error(call, retries: int = 5, wait=0.0, verbose=True, *args, **kwargs):
+    def _retry_on_error(
+            call, throttler: Optional[ThrottlerFast] = None,
+            retries: int = 3, wait=0.0, verbose=True, *args, **kwargs
+    ):
         for i in range(retries):
             try:
+                if throttler is not None:
+                    throttler.submit()
                 return call(*args, **kwargs)
             except Exception as e:
-                if 'timed out' in str(e) or \
-                        'timeout' in str(e) or \
-                        isinstance(e, TimeoutError) or \
-                        isinstance(e, HTTPSConnectionPool):
+                if retries == 1:
+                    raise e
+                else:
                     if verbose:
-                        logger.info(f'{call.__name__}, args: {args}, kwargs: {kwargs}. Error: {str(e)}.')
+                        logger.warning(f'retries: {call.__name__}, args: {args}, kwargs: {kwargs}. Error: {str(e)}.')
                     if i == retries - 1:
                         raise e
-                    if wait > 0:
-                        time.sleep(wait)
-                else:
-                    raise e
+                    time.sleep(wait)
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
-        # self.throttler.submit_and_wait()
-        req = self._retry_on_error(self._request, method='GET', path=path, params=params)
-        return self._post_processing(req, pagination=pagination)
+    def _get(self, path: str, throttler: Optional[ThrottlerFast] = None,
+             params: Optional[Dict[str, Any]] = None, pagination: bool = False, retries: int = 3) -> Any:
+        return self._req(path=path, method='GET', throttler=throttler, params=params, pagination=pagination)
 
-    def _post(self, path: str, params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
-        # self.throttler.submit_and_wait()
-        req = self._retry_on_error(self._request, method='POST', path=path, params=params)
+    def _post(self, path: str, throttler: Optional[ThrottlerFast] = None,
+              params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
+        return self._req(path=path, method='POST', throttler=throttler, params=params, pagination=pagination)
+
+    def _req(self, path: str, method: str, throttler: Optional[ThrottlerFast] = None,
+             params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
+        req = self._retry_on_error(
+            self._request, retries=self.retries, throttler=throttler, method=method, path=path, params=params
+        )
         return self._post_processing(req, pagination=pagination)
 
     def _sign_request(self, timestamp: str, params: str) -> str:
@@ -1021,7 +1094,10 @@ class ByBitRest:
             params = {'category': self.category, 'settleCoin': settle_coin}
             params.update(kwargs)
             path = '/v5/position/list'
-            return self._paginate(self._get, unique_key='symbol', path=path, params=params)
+            return self._paginate(
+                self._get, throttler=self.throttler_positions_list,
+                unique_key='symbol', path=path, params=params
+            )
 
     def get_orders(
             self,
@@ -1034,7 +1110,10 @@ class ByBitRest:
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
         path = '/v5/order/history'
-        return self._paginate(call=self._get, unique_key='orderId', path=path, params=params, max_records=max_records)
+        return self._paginate(
+            call=self._get, throttler=self.throttler_order_history,
+            unique_key='orderId', path=path, params=params, max_records=max_records
+        )
 
     def get_open_orders(self, symbol: Optional[str] = None, settle_coin: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
@@ -1052,19 +1131,19 @@ class ByBitRest:
             params.update({'settleCoin': settle_coin})
         params.update(kwargs)
         path = '/v5/order/realtime'
-        return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
+        return self._paginate(
+            call=self._get, throttler=self.throttler_order_realtime, unique_key='orderId', path=path, params=params
+        )
 
     def get_balances(self, **kwargs) -> dict:
         params = dict(kwargs)
         path = '/v5/account/wallet-balance'
         return {
-            at: self._get(path, params={**params, **{'accountType': at}}) for at in
+            at: self._get(
+                path, throttler=self.throttler_wallet_balance,
+                params={**params, **{'accountType': at}}) for at in
             [ACCOUNT_TYPE_UNIFIED, ACCOUNT_TYPE_CONTRACT]
         }
-
-    def query_symbols_v2(self, **kwargs) -> List[dict]:
-        params = dict(kwargs)
-        return self._get('/v2/public/symbols', params=params)
 
     def _round(self, symbol: str, price: Optional[float] = None, size: Optional[float] = None) -> float:
         assert price is None or size is None
@@ -1089,13 +1168,13 @@ class ByBitRest:
         params = {'category': self.category, 'symbol': symbol, 'orderId': order_id, 'orderLinkId': client_id}
         params.update(kwargs)
         path = '/v5/order/cancel'
-        return self._post(path, params)
+        return self._post(path=path, throttler=self.throttler_order_cancel, params=params)
 
     def get_markets(self, symbol: Optional[str] = None, **kwargs) -> List[dict]:
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
         path = '/v5/market/tickers'
-        return self._get(path, params)
+        return self._get(path=path, throttler=self.throttler_global, params=params)
 
     def get_orderbook(self, symbol: str, depth: Optional[int] = None, **kwargs) -> dict:
         if depth is not None:
@@ -1106,7 +1185,7 @@ class ByBitRest:
         params = {'category': self.category, 'symbol': symbol, 'limit': depth}
         params.update(kwargs)
         path = '/v5/market/orderbook'
-        ob = self._get(path, params)
+        ob = self._get(path=path, throttler=self.throttler_global, params=params)
         ob['bids'] = list(reversed([[float(t[0]), float(t[1])] for t in ob['b']]))
         ob['asks'] = [[float(t[0]), float(t[1])] for t in ob['a']]
         del ob['a']
@@ -1138,7 +1217,7 @@ class ByBitRest:
         params.update(kwargs)
         try:
             path = '/v5/order/cancel-all'
-            return self._post(path, params)
+            return self._post(path=path, throttler=self.throttler_order_all_cancel, params=params)
         except Exception as e:
             if str(e).lower() == 'cancel all no result':
                 return []
@@ -1172,8 +1251,7 @@ class ByBitRest:
             assert order_id is not None
         path = '/v5/order/amend'
         return self._post(
-            path=path,
-            params=params
+            path=path, params=params, throttler=self.throttler_order_amend
         )
 
     def _resolve_symbol_from_cache(
@@ -1204,6 +1282,7 @@ class ByBitRest:
             ioc: bool = False,
             post_only: bool = False,
             client_id: Optional[str] = None,
+            use_throttle: bool = True,
             **kwargs
     ) -> dict:
         type_ = type.lower()
@@ -1234,7 +1313,8 @@ class ByBitRest:
         }
         params.update(kwargs)
         path = '/v5/order/create'
-        resp = self._post(path=path, params=params)
+        throttle = self.throttler_order_create if use_throttle else None
+        resp = self._post(path=path, params=params, throttler=throttle)
         order_id = resp.get('orderId')
         client_id = resp.get('orderLinkId')
         if order_id is not None:
@@ -1254,10 +1334,47 @@ class ByBitRest:
             'symbol': symbol,
         }
         params.update(kwargs)
-        return self._paginate(call=self._get, unique_key='orderId', path=path, params=params)
+        return self._paginate(
+            call=self._get, throttler=self.throttler_order_history, unique_key='orderId', path=path, params=params
+        )
+
+    def get_risk_limit(self, symbol: Optional[str] = None, **kwargs):
+        path = '/v5/market/risk-limit'
+        params = {'category': self.category}
+        if symbol is not None:
+            params['symbol'] = symbol
+        params.update(kwargs)
+        return self._get(path=path, throttler=self.throttler_global, params=params)
+
+    def set_leverage(self, symbol: str, leverage: int, **kwargs):
+        path = '/v5/position/set-leverage'
+        params = {
+            'category': self.category,
+            'symbol': symbol,
+            'buyLeverage': str(leverage),
+            'sellLeverage': str(leverage)
+        }
+        params.update(kwargs)
+        return self._post(path=path, throttler=self.throttler_global, params=params)
+
+    def set_risk_limit(self, symbol: str, risk_id: int, **kwargs):
+        path = '/v5/position/set-risk-limit'
+        params = {'category': self.category, 'symbol': symbol, 'riskId': risk_id}
+        params.update(kwargs)
+        return self._post(path=path, throttler=self.throttler_global, params=params)
+
+    def get_closed_pnl(self, symbol: Optional[str] = None, **kwargs):
+        path = '/v5/position/closed-pnl'
+        params = {'category': self.category}
+        if symbol is not None:
+            params['symbol'] = symbol
+        params.update(kwargs)
+        # Could later paginate it.
+        return self._get(path=path, throttler=self.throttler_global, params=params)
 
     @staticmethod
-    def _paginate(call: Callable, unique_key: str, path: str, params: Dict, max_records: int = int(1e9)) -> List[Dict]:
+    def _paginate(call: Callable, unique_key: str, path: str, throttler: ThrottlerFast,
+                  params: Dict, max_records: int = int(1e9)) -> List[Dict]:
         records = []
         keys = set()
         past_cursors = set()
@@ -1271,7 +1388,7 @@ class ByBitRest:
                 past_cursors.add(cursor)
             else:
                 break
-            results = call(path=path, params=params, pagination=True)
+            results = call(path=path, params=params, throttler=throttler, pagination=True)
             if len(results) == 0:
                 break
             old_key_count = len(keys)
@@ -1293,7 +1410,8 @@ class ByBitRest:
         params.update(kwargs)
         path = '/v5/market/instruments-info'
         return self._paginate(
-            self._get,
+            call=self._get,
+            throttler=self.throttler_global,
             unique_key='symbol',
             path=path,
             params=params
@@ -1306,7 +1424,9 @@ class ByBitRest:
         path = '/v5/account/transaction-log'
         params = {'category': self.category}
         params.update(kwargs)
-        return self._paginate(call=self._get, unique_key='tradeId', path=path, params=params)
+        return self._paginate(
+            call=self._get, unique_key='tradeId', path=path, throttler=self.throttler_transaction_log, params=params
+        )
 
     def get_executions(
             self,
@@ -1320,14 +1440,15 @@ class ByBitRest:
         params.update(kwargs)
         path = '/v5/execution/list'
         return self._paginate(
-            call=self._get, unique_key='execId', path=path, params=params, max_records=max_records
+            call=self._get, unique_key='execId', path=path, params=params,
+            max_records=max_records, throttler=self.throttler_executions_list
         )
 
     def get_funding_history(self, symbol: str, **kwargs):
         params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
         path = '/v5/market/funding/history'
-        return self._get(path=path, params=params)
+        return self._get(path=path, throttler=self.throttler_global, params=params)
 
 
 class ByBitStream:
@@ -1345,9 +1466,7 @@ class ByBitStream:
             category: str = 'linear',
             background: bool = False,
             print_stats_every: int = 600,
-            rest_api: Optional[ByBitRest] = None
     ):
-        self.rest_api = rest_api
         self.background = background
         self.private_topics = {
             self.TOPIC_ORDER: 'order',
@@ -1367,8 +1486,8 @@ class ByBitStream:
         else:
             self.url = f'wss://stream.bybit.com/v5/public/{category}'
         logger.info(f'URL: {self.url}.')
-        bybit_time = float(requests.get('https://api.bybit.com/v5/market/time').json()['result']['timeNano']) / 1e9
         our_time = time.time()
+        bybit_time = float(requests.get('https://api.bybit.com/v5/market/time').json()['result']['timeNano']) / 1e9
         self.latency_offset = bybit_time - our_time
         logger.info(f'Latency offset is {self.latency_offset} seconds (adjusted).')
         if self.latency_offset < 0:
@@ -1382,12 +1501,14 @@ class ByBitStream:
         self.subscribe_to_tickers = subscribe_to_tickers
         self.orderbook_depth = orderbook_depth
         self.orderbook_handler = ByBitOrderBooks()
-        self.ticker_handler = ByBitTickers()
-        self.order_status_handler = ByBitOrderStatuses()
-        self.position_handler = ByBitPositions()
+        self.ticker_handler = ByBitRealTimeTickers()
+        self.order_status_handler = ByBitRealTimeOrderStatuses()
+        self.position_handler = ByBitRealTimePositions()
         self.execution_handler = ByBitExecutions()
         self.order_book_symbols = set()
         self.tickers_symbols = set()
+        self.delay = 0.0
+        self.counter = 0
         self.ws = None
         self._ready = False
         self._conn_ws()
@@ -1409,7 +1530,7 @@ class ByBitStream:
 
     @property
     def type(self):
-        return 'private' if self.private else 'public'
+        return 'prv' if self.private else 'pub'
 
     # noinspection PyUnusedLocal
     def _on_message(self, ws, message):
@@ -1419,7 +1540,7 @@ class ByBitStream:
             # https://bybit-exchange.github.io/docs/futuresV2/inverse/#t-api
             if 'op' in data and data['op'] == 'subscribe':
                 if data['success']:
-                    logger.info(f'Subscription successful. Connection ID is {data["conn_id"]}.')
+                    logger.info(f'Subscription successful.')
                     return
                 else:
                     raise Exception('Could not subscribe.')
@@ -1436,8 +1557,14 @@ class ByBitStream:
                 logger.info(f'Authenticated. Connection ID is {data["conn_id"]}.')
                 return
             if 'topic' in data:
+                # noinspection PyBroadException
+                try:
+                    self.delay += max((time.time() - _convert_ts(data['ts'])) * 1e3, 0)
+                    self.counter += 1
+                except Exception:
+                    pass
                 topic = data['topic']
-                self._print_stats(data, topic)
+                # self._print_stats(data, topic)
                 if topic.startswith('orderbook'):
                     self.orderbook_handler.on_message(data)
                 elif topic.startswith('tickers'):
@@ -1456,34 +1583,34 @@ class ByBitStream:
             logger.exception(str(e))
             logger.warning(f'ERROR: {data} {str(e)}.')
 
-    def _print_stats(self, data, topic):
-        if self.print_status_every <= 0:
-            return
-        if self.private:
-            return
-        ts = data['ts'] / 1e3
-        our_ts = time.time()
-        latency = self.latency_offset + our_ts - ts
-        self.latency_per_sub[topic].append(latency)
-        if self._last_debug_ts is None:
-            self._last_debug_ts = ts
-        if ts - self._last_debug_ts > self.print_status_every:
-            self._last_debug_ts = ts
-            if self.subscribe_to_tickers:
-                ticker_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('tickers')], [])
-                ticker_mean = np.mean(ticker_latencies) * 1000
-                ticker_median = np.median(ticker_latencies) * 1000
-                logger.info(f'Stats: tickers: mean/median/count {ticker_mean:.2f}ms/'
-                            f'{ticker_median:.2f}ms/{len(ticker_latencies)}, '
-                            f'(interval: {self.print_status_every}s).')
-            if self.subscribe_to_order_books:
-                orderbook_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('orderbook')], [])
-                orderbook_mean = np.mean(orderbook_latencies) * 1000
-                orderbook_median = np.median(orderbook_latencies) * 1000
-                logger.info(f'Stats: orderbook: mean/median/count {orderbook_mean:.2f}ms/'
-                            f'{orderbook_median:.2f}ms/{len(orderbook_latencies)},'
-                            f' (interval: {self.print_status_every}s).')
-            self.latency_per_sub.clear()
+    # def _print_stats(self, data, topic):
+    #     if self.print_status_every <= 0:
+    #         return
+    #     if self.private:
+    #         return
+    #     ts = data['ts'] / 1e3
+    #     our_ts = time.time()
+    #     latency = self.latency_offset + our_ts - ts
+    #     self.latency_per_sub[topic].append(latency)
+    #     if self._last_debug_ts is None:
+    #         self._last_debug_ts = ts
+    #     if ts - self._last_debug_ts > self.print_status_every:
+    #         self._last_debug_ts = ts
+    #         if self.subscribe_to_tickers:
+    #             ticker_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('tickers')], [])
+    #             ticker_mean = np.mean(ticker_latencies) * 1000
+    #             ticker_median = np.median(ticker_latencies) * 1000
+    #             logger.info(f'Stats: tickers: mean/median/count {ticker_mean:.2f}ms/'
+    #                         f'{ticker_median:.2f}ms/{len(ticker_latencies)}, '
+    #                         f'(interval: {self.print_status_every}s).')
+    #         if self.subscribe_to_order_books:
+    #             orderbook_latencies = sum([b for a, b in self.latency_per_sub.items() if a.startswith('orderbook')], [])
+    #             orderbook_mean = np.mean(orderbook_latencies) * 1000
+    #             orderbook_median = np.median(orderbook_latencies) * 1000
+    #             logger.info(f'Stats: orderbook: mean/median/count {orderbook_mean:.2f}ms/'
+    #                         f'{orderbook_median:.2f}ms/{len(orderbook_latencies)},'
+    #                         f' (interval: {self.print_status_every}s).')
+    #         self.latency_per_sub.clear()
 
     # noinspection PyUnusedLocal
     @staticmethod
