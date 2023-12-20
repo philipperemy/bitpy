@@ -1498,8 +1498,8 @@ class ByBitStream:
         self.latency_per_sub = defaultdict(list)
         # https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook
         assert orderbook_depth in [1, 50, 200, 500]
-        self.subscribe_to_order_books = subscribe_to_order_books
-        self.subscribe_to_tickers = subscribe_to_tickers
+        self._subscribe_to_order_books = subscribe_to_order_books
+        self._subscribe_to_tickers = subscribe_to_tickers
         self.orderbook_depth = orderbook_depth
         self.orderbook_handler = ByBitOrderBooks()
         self.ticker_handler = ByBitRealTimeTickers()
@@ -1635,6 +1635,17 @@ class ByBitStream:
             topics = list(self.private_topics.values())
         self.subscribe(topics)
         self._ready = True
+
+    def subscribe_to_tickers(self, symbols: List[str], batch_size: int = 20, wait: float = 0.5):
+        topics = []
+        for symbol in symbols:
+            if symbol not in self.tickers_symbols:
+                self.tickers_symbols.add(symbol)
+                topics.append(symbol)
+        batches = [topics[i:i + batch_size] for i in range(0, len(topics), batch_size)]
+        for batch in batches:
+            self.subscribe([f'tickers.{symbol}' for symbol in batch])
+            time.sleep(wait)
 
     def subscribe_to_ticker(self, symbol: str):
         if symbol not in self.tickers_symbols:
