@@ -1370,8 +1370,9 @@ class ByBitRest:
         if symbol is not None:
             params['symbol'] = symbol
         params.update(kwargs)
-        # Could later paginate it.
-        return self._get(path=path, throttler=self.throttler_global, params=params)
+        return self._paginate(
+            self._get, path=path, throttler=self.throttler_global, params=params, unique_key='orderId'
+        )
 
     @staticmethod
     def _paginate(call: Callable, unique_key: str, path: str, throttler: ThrottlerFast,
