@@ -1136,6 +1136,10 @@ class ByBitRest:
             call=self._get, throttler=self.throttler_order_realtime, unique_key='orderId', path=path, params=params
         )
 
+    def get_borrow_date(self, **kwargs):
+        path = '/unified/v3/private/account/borrow-rate'
+        return self._get(path=path, throttler=self.throttler_global, params=kwargs)
+
     def get_balances(self, **kwargs) -> dict:
         params = dict(kwargs)
         path = '/v5/account/wallet-balance'
