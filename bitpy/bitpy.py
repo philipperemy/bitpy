@@ -299,6 +299,7 @@ class ExceptionMapper:
         '110068': ExchangeError,
         '110069': ExchangeError,
         '110070': ExchangeError,
+        '3400214': ExchangeError,
     }
 
     @staticmethod
@@ -650,15 +651,30 @@ class ByBit:
             funding.sort_index(inplace=True)
         return funding
 
+    def get_order_history(
+            self,
+            start_date: Optional[datetime] = None,
+            end_date: Optional[datetime] = None,
+            **kwargs
+    ) -> List[dict]:
+        if end_date is None:
+            end_date = datetime.utcnow()
+        if start_date is None:
+            start_date = datetime.utcnow() - timedelta(days=7)
+        start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
+        return self.rest.get_order_history(startTime=start_time, endTime=end_time, **kwargs)
+
     def get_trade_history(
             self,
             start_date: Optional[datetime] = None,
             end_date: Optional[datetime] = None,
             **kwargs
     ) -> List[dict]:
-        if start_date is None:
+        if end_date is None:
             end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=7)
+        if start_date is None:
+            start_date = datetime.utcnow() - timedelta(days=7)
         start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
         end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
         return self.rest.get_trade_history(startTime=start_time, endTime=end_time, **kwargs)
@@ -1359,10 +1375,7 @@ class ByBitRest:
             **kwargs
     ) -> List[dict]:
         path = '/v5/order/history'
-        params = {
-            'category': self.category,
-            'symbol': symbol,
-        }
+        params = {'category': self.category, 'symbol': symbol}
         params.update(kwargs)
         return self._paginate(
             call=self._get, throttler=self.throttler_order_history, unique_key='orderId', path=path, params=params
