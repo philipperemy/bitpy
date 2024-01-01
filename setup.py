@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='bitpy',
-    version='1.37',
+    version='1.38',
     description='BitPy',
     author='Philippe Remy',
     install_requires=[

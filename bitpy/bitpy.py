@@ -685,7 +685,8 @@ class ByBit:
             start_date = datetime.utcnow() - timedelta(days=7)
         start_time = int(start_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
         end_time = int(end_date.replace(tzinfo=timezone.utc).replace(tzinfo=timezone.utc).timestamp() * 1e3)
-        return self.rest.get_trade_history(startTime=start_time, endTime=end_time, **kwargs)
+        trades = self.rest.get_trade_history(startTime=start_time, endTime=end_time, **kwargs)
+        return [t for t in trades if t['type'] == 'TRADE']
 
     def get_funding_history(
             self,
