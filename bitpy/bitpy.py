@@ -1002,19 +1002,27 @@ class ByBitRest:
                     time.sleep(wait)
 
     def _get(self, path: str, throttler: Optional[ThrottlerFast] = None,
-             params: Optional[Dict[str, Any]] = None, pagination: bool = False, retries: int = 3) -> Any:
-        return self._req(path=path, method='GET', throttler=throttler, params=params, pagination=pagination)
+             params: Optional[Dict[str, Any]] = None, pagination: bool = False, post_processing: bool = True) -> Any:
+        return self._req(
+            path=path, method='GET', throttler=throttler, params=params,
+            pagination=pagination, post_processing=post_processing
+        )
 
     def _post(self, path: str, throttler: Optional[ThrottlerFast] = None,
-              params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
-        return self._req(path=path, method='POST', throttler=throttler, params=params, pagination=pagination)
+              params: Optional[Dict[str, Any]] = None, pagination: bool = False, post_processing: bool = True) -> Any:
+        return self._req(
+            path=path, method='POST', throttler=throttler, params=params,
+            pagination=pagination, post_processing=post_processing
+        )
 
     def _req(self, path: str, method: str, throttler: Optional[ThrottlerFast] = None,
-             params: Optional[Dict[str, Any]] = None, pagination: bool = False) -> Any:
+             params: Optional[Dict[str, Any]] = None, pagination: bool = False, post_processing: bool = True) -> Any:
         req = self._retry_on_error(
             self._request, retries=self.retries, throttler=throttler, method=method, path=path, params=params
         )
-        return self._post_processing(req, pagination=pagination)
+        if post_processing:
+            return self._post_processing(req, pagination=pagination)
+        return req
 
     def _sign_request(self, timestamp: str, params: str) -> str:
         payload = str(params)
@@ -1099,6 +1107,23 @@ class ByBitRest:
                 self._get, throttler=self.throttler_positions_list,
                 unique_key='symbol', path=path, params=params
             )
+
+    def get_kline(
+            self,
+            symbol: str,
+            interval: str = '1',
+            **kwargs
+    ):
+        params = {'category': self.category, 'symbol': symbol, 'interval': interval}
+        params.update(kwargs)
+        path = '/v5/market/kline'
+        data = self._get(throttler=self.throttler_global, path=path, params=params, post_processing=False)
+        columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Turnover']
+        data = pd.DataFrame(data['list'], columns=columns).astype(float)
+        data['Time'] = data['Time'].apply(lambda x: datetime.utcfromtimestamp(x / 1e3))
+        data.set_index('Time', inplace=True)
+        data.sort_index(inplace=True)
+        return data
 
     def get_orders(
             self,
