@@ -465,15 +465,22 @@ class ByBit:
     def __init__(
             self,
             credentials: Optional[Union[Path, str]] = None,
+            minimal: bool = False,
             subscribe_to_order_books: bool = False,
             subscribe_to_tickers: bool = False,
             subscribe_to_private_feed: bool = True,
+            auto_pull_rest_tickers: bool = True,
             orderbook_depth: int = 50,
             category: str = 'linear',
             base_url: str = 'https://api.bybit.com',
             timeout: int = 3,
             retries: int = 1
     ):
+        if minimal:
+            subscribe_to_order_books = False
+            subscribe_to_tickers = False
+            subscribe_to_private_feed = False
+            auto_pull_rest_tickers = False
         self.credentials = credentials
         self.rest = ByBitRest.from_credentials_file(
             self.credentials, category=category,
@@ -499,7 +506,8 @@ class ByBit:
             )
         self._rest_tickers = self.fetch_rest_tickers()
         self.rest_tickers_last_time = time.time()
-        _runs_in_a_thread(self._run_fetch_rest_tickers_forever, name='RestTicker')
+        if auto_pull_rest_tickers:
+            _runs_in_a_thread(self._run_fetch_rest_tickers_forever, name='RestTicker')
 
     def fetch_rest_tickers(self) -> Dict[str, Dict]:
         return {m['symbol']: m for m in self.rest.get_markets()}
