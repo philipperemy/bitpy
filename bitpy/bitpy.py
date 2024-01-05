@@ -471,7 +471,7 @@ class BatchRequest:
     def check_result(self, key: str, timeout: float):
         end_time = time.time() + timeout
         while time.time() < end_time:
-            result = dict(self._results.get(key))
+            result = self._results.get(key)
             if result is not None:
                 del self._results[key]
                 return result
