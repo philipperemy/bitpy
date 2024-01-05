@@ -839,23 +839,22 @@ class ByBit:
         return history
 
 
-class TimeInForceV3(Enum):
-    GTC = 'GoodTillCancel'
-    IOC = 'ImmediateOrCancel'
-    FOK = 'FillOrKill'
-    POS = 'PostOnly'
-
-
 class TimeInForce(Enum):
     GTC = 'GTC'
     IOC = 'IOC'
     FOK = 'FOK'
     POS = 'PostOnly'
 
+    def __str__(self):
+        return self.value
+
 
 class OrderFilter(Enum):
     ORD = 'Order'
     STOP = 'StopOrder'
+
+    def __str__(self):
+        return self.value
 
 
 class OrderStatus(Enum):
@@ -873,6 +872,9 @@ class OrderStatus(Enum):
     DEACTIVATED = 'Deactivated'
     TRIGGERED = 'Triggered'
     ACTIVE = 'Active'
+
+    def __str__(self):
+        return self.value
 
 
 class ByBitExecutions:
