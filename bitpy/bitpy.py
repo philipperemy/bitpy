@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
+import queue
 import tempfile
 import threading
 import time
@@ -12,11 +13,13 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 from typing import Union
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import orjson
 import pandas as pd
 import requests
 import websocket
+from pybit.unified_trading import HTTP
 from requests import Session, Response
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,39 @@ class RateLimitExceeded(Exception):
 
 class PermissionDenied(Exception):
     pass
+
+
+def _run_with_timeout(func, name: Optional[str] = None, timeout_seconds: float = 10.0, *args, **kwargs) -> Optional[
+    Any]:
+    result = None
+    exc = None
+    name = threading.current_thread().name if name is None else name
+
+    def target():
+        nonlocal result, exc
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            exc = e
+
+    thread = threading.Thread(target=target, name=name)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+
+    if thread.is_alive():
+        # noinspection PyBroadException
+        try:
+            func_name = func.__name__
+        except Exception:
+            func_name = func
+        if len(args) > 0:
+            timeout_msg = f'Timeout: {func_name}, {args}, {json.dumps(kwargs, default=str)}.'
+        else:
+            timeout_msg = f'Timeout: {func_name}, {json.dumps(kwargs, default=str)}.'
+        raise TimeoutError(timeout_msg)
+    if exc is not None:
+        raise exc
+    return result
 
 
 class ExceptionMapper:
@@ -389,6 +425,91 @@ def _result_to_float_values(d: Union[List, dict]) -> Union[List, dict, List[floa
     return res
 
 
+class BatchRequest:
+
+    def __init__(self, every: float, category: str, func: Callable):
+        # https://bybit-exchange.github.io/docs/v5/order/batch-place
+        # https://bybit-exchange.github.io/docs/v5/order/batch-amend
+        self._push_queue = queue.Queue()
+        self._results = {}
+        self._func = func
+        self._every = every
+        self._category = category
+        self._init = False
+        self._lock = threading.Lock()
+        # Bybit rate limit.
+        self._max_per_request = 10 if category == 'linear' else 20
+
+    def init(self):
+        _runs_in_a_thread(self.run, name='BatchRequest')
+
+    def run(self):
+        last_req_time = None
+        self._init = True
+        while True:
+            try:
+                last_req_time = time.time()
+                batch, keys = self.get_next_batch()
+                if len(batch) > 0:
+                    # protected with timeout.
+                    results = self._func({'category': self._category, 'request': batch})
+                    self.process_response(keys, results)
+            except Exception as e:
+                logger.warning(f'BatchRequest: {str(e)}.')
+            finally:
+                elapsed = time.time() - last_req_time
+                time.sleep(max(0.2, self._every - elapsed))
+
+    def send_request(self, param: Dict) -> str:
+        with self._lock:
+            if not self._init:
+                self.init()
+        key = str(uuid4())
+        self._push_queue.put([key, param])
+        return key
+
+    def check_result(self, key: str, timeout: float):
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            result = dict(self._results.get(key))
+            if result is not None:
+                del self._results[key]
+                return result
+            time.sleep(0.001)
+        raise TimeoutError(f'Batch request timeout ({timeout}s) for {key}.')
+
+    def process_response(self, keys: List[str], results: Dict):
+        num_results = len(results['result']['list'])
+        for i in range(num_results):
+            status = results['retExtInfo']['list'][i]
+            resp = results['result']['list'][i]
+            resp['retCode'] = status['code']
+            resp['retMsg'] = status['msg']
+            self._results[keys[i]] = resp
+
+    def get_next_batch(self):
+        batch = []
+        keys = []
+        while True:
+            try:
+                req = self._push_queue.get_nowait()
+            except queue.Empty:
+                req = None
+            if req is not None:
+                key, req_ = req
+                item_ = {a: b for a, b in req_.items() if b is not None}
+                # integer, float -> string. Bybit is weird I know.
+                item_ = {key: str(value) if not isinstance(value, bool) else value for key, value in
+                         item_.items()}
+                batch.append(item_)
+                keys.append(key)
+                if len(batch) >= self._max_per_request:
+                    break
+            else:
+                break
+        return batch, keys
+
+
 class ThrottlerFast:
     delays = deque(maxlen=1000)
 
@@ -590,9 +711,12 @@ class ByBit:
             client_id: Optional[str] = None,
             size: Optional[float] = None,
             price: Optional[float] = None,
+            batch: bool = False,
             **kwargs
     ) -> dict:
-        return self.rest.modify_order(symbol, order_id, client_id, size, price, **kwargs)
+        return self.rest.modify_order(
+            symbol=symbol, order_id=order_id, client_id=client_id, size=size, price=price, batch=batch, **kwargs
+        )
 
     # noinspection PyShadowingBuiltins
     def place_order(
@@ -606,9 +730,13 @@ class ByBit:
             ioc: bool = False,
             post_only: bool = False,
             client_id: Optional[str] = None,
+            batch: bool = False,
             **kwargs
     ) -> dict:
-        return self.rest.place_order(symbol, side, price, size, type, reduce_only, ioc, post_only, client_id, **kwargs)
+        return self.rest.place_order(
+            symbol=symbol, side=side, price=price, size=size, type=type, reduce_only=reduce_only,
+            ioc=ioc, post_only=post_only, client_id=client_id, batch=batch, **kwargs
+        )
 
     def cancel_order(
             self,
@@ -959,7 +1087,9 @@ class ByBitRest:
         self._api_secret = api_secret
         self._recv_window = str(5000)
         self.throttler_order_create = ThrottlerFast(10, 1, 'order_create')
+        self.throttler_batch_order_create = ThrottlerFast(10, 1, 'batch_order_create')
         self.throttler_order_amend = ThrottlerFast(10, 1, 'order_amend')
+        self.throttler_batch_order_amend = ThrottlerFast(10, 1, 'batch_order_amend')
         self.throttler_order_cancel = ThrottlerFast(10, 1, 'order_cancel')
         self.throttler_order_all_cancel = ThrottlerFast(10, 1, 'order_all_cancel')
         self.throttler_order_realtime = ThrottlerFast(50, 1, 'order_realtime')
@@ -981,7 +1111,10 @@ class ByBitRest:
         # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
-        # https://bybit-exchange.github.io/docs/v5/rate-limit
+        self.batch_amend = BatchRequest(every=0.15, category=self.category, func=self.batch_modify_order)
+        self.batch_create = BatchRequest(every=0.15, category=self.category, func=self.batch_place_order)
+        # for batch requests. I could not figure out why it was not working with the current bitpy implementation.
+        self.http_session = HTTP(testnet=False, api_key=api_key, api_secret=api_secret)
 
     @classmethod
     def from_credentials_file(cls, credentials: Union[Path, str, None] = None, **kwargs):
@@ -1093,6 +1226,18 @@ class ByBitRest:
                 headers=headers, timeout=timeout
             )
         return self._process_response(response)
+
+    @staticmethod
+    def _process_response_batch(data: Dict) -> Any:
+        ret_code = data['retCode' if 'retCode' in data else 'ret_code']
+        ret_msg = data['retMsg' if 'retMsg' in data else 'ret_msg']
+        if ret_code != 0:
+            e = ExceptionMapper.from_code(ret_code)
+            if e is None:
+                raise Exception(ret_msg)
+            else:
+                raise e(ret_msg)
+        return data['result']
 
     @staticmethod
     def _process_response(response: Response) -> Any:
@@ -1278,6 +1423,20 @@ class ByBitRest:
                 return []
             raise e
 
+    def batch_modify_order(self, params: Dict):
+        self.throttler_batch_order_amend.submit()
+        return _run_with_timeout(
+            func=self.http_session.amend_batch_order,
+            timeout_seconds=self.timeout, **params
+        )
+
+    def batch_place_order(self, params: Dict):
+        self.throttler_batch_order_create.submit()
+        return _run_with_timeout(
+            func=self.http_session.place_batch_order,
+            timeout_seconds=self.timeout, **params
+        )
+
     def modify_order(
             self,
             symbol: Optional[str] = None,
@@ -1285,6 +1444,7 @@ class ByBitRest:
             client_id: Optional[str] = None,
             size: Optional[float] = None,
             price: Optional[float] = None,
+            batch: bool = False,
             **kwargs
     ) -> dict:
         # https://bybit-exchange.github.io/docs/v5/order/amend-order
@@ -1304,10 +1464,13 @@ class ByBitRest:
         params.update(kwargs)
         if client_id is None:
             assert order_id is not None
-        path = '/v5/order/amend'
-        return self._post(
-            path=path, params=params, throttler=self.throttler_order_amend
-        )
+        if batch:
+            batch_key = self.batch_amend.send_request(params)
+            data = self.batch_amend.check_result(batch_key, timeout=self.timeout)
+            return self._process_response_batch(data)
+        else:
+            path = '/v5/order/amend'
+            return self._post(path=path, params=params, throttler=self.throttler_order_amend)
 
     def _resolve_symbol_from_cache(
             self,
@@ -1338,6 +1501,7 @@ class ByBitRest:
             post_only: bool = False,
             client_id: Optional[str] = None,
             use_throttle: bool = True,
+            batch: bool = False,
             **kwargs
     ) -> dict:
         type_ = type.lower()
@@ -1367,9 +1531,14 @@ class ByBitRest:
             'timeInForce': tif,
         }
         params.update(kwargs)
-        path = '/v5/order/create'
-        throttle = self.throttler_order_create if use_throttle else None
-        resp = self._post(path=path, params=params, throttler=throttle)
+        if batch:
+            batch_key = self.batch_create.send_request(params)
+            data = self.batch_create.check_result(batch_key, timeout=self.timeout)
+            resp = self._process_response_batch(data)
+        else:
+            path = '/v5/order/create'
+            throttle = self.throttler_order_create if use_throttle else None
+            resp = self._post(path=path, params=params, throttler=throttle)
         order_id = resp.get('orderId')
         client_id = resp.get('orderLinkId')
         if order_id is not None:

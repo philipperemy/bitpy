@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='bitpy',
-    version='1.38',
+    version='1.39',
     description='BitPy',
     author='Philippe Remy',
     install_requires=[
@@ -11,7 +11,8 @@ setup(
         'websocket-client',
         'requests',
         'urllib3',
-        'orjson'
+        'orjson',
+        'pybit'
     ],
     packages=find_packages()
 )
