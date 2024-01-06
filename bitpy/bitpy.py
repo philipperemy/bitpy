@@ -427,7 +427,7 @@ def _result_to_float_values(d: Union[List, dict]) -> Union[List, dict, List[floa
 
 class BatchRequest:
 
-    def __init__(self, every: float, category: str, func: Callable):
+    def __init__(self, every: float, category: str, func: Callable, verbose: bool = True):
         # https://bybit-exchange.github.io/docs/v5/order/batch-place
         # https://bybit-exchange.github.io/docs/v5/order/batch-amend
         self._push_queue = queue.Queue()
@@ -437,6 +437,7 @@ class BatchRequest:
         self._category = category
         self._init = False
         self._lock = threading.Lock()
+        self._verbose = verbose
         # Bybit rate limit.
         self._max_per_request = 10 if category == 'linear' else 20
         self._throttler = ThrottlerFast(self._max_per_request + 1, 1, 'batch_request')
@@ -449,15 +450,19 @@ class BatchRequest:
         while True:
             try:
                 batch, keys = self.get_next_batch()
-                if len(batch) > 0:
+                batch_count = len(batch)
+                if batch_count > 0:
                     # protected with timeout.
-                    for _ in range(len(batch)):
+                    for _ in range(batch_count):
                         self._throttler.submit()
                     # Too many visits. Exceeded the API Rate Limit.
                     batch_request = {'category': self._category, 'request': batch}
-                    logger.info(f'Batch request: ({self._func.__name__}): {json.dumps(batch_request)}.')
+                    fun_name = self._func.__name__
+                    if self._verbose:
+                        logger.info(f'Batch request ({batch_count}): ({fun_name}): {json.dumps(batch_request)}.')
                     results = self._func(batch_request)
-                    logger.info(f'Batch response: ({self._func.__name__}): {json.dumps(results)}.')
+                    if self._verbose:
+                        logger.info(f'Batch response ({batch_count}): ({fun_name}): {json.dumps(results)}.')
                     self.process_response(keys, results)
             except Exception as e:
                 logger.warning(f'BatchRequest: {str(e)}.')
