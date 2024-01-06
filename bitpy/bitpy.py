@@ -20,7 +20,7 @@ import pandas as pd
 import requests
 import websocket
 from pybit.unified_trading import HTTP
-from requests import Session, Response
+from requests import Session, Response, adapters
 
 logger = logging.getLogger(__name__)
 
@@ -439,26 +439,30 @@ class BatchRequest:
         self._lock = threading.Lock()
         # Bybit rate limit.
         self._max_per_request = 10 if category == 'linear' else 20
+        self._throttler = ThrottlerFast(self._max_per_request + 1, 1, 'batch_request')
 
     def init(self):
         _runs_in_a_thread(self.run, name='BatchRequest')
 
     def run(self):
-        last_req_time = None
         self._init = True
         while True:
             try:
-                last_req_time = time.time()
                 batch, keys = self.get_next_batch()
                 if len(batch) > 0:
                     # protected with timeout.
-                    results = self._func({'category': self._category, 'request': batch})
+                    for _ in range(len(batch)):
+                        self._throttler.submit()
+                    # Too many visits. Exceeded the API Rate Limit.
+                    batch_request = {'category': self._category, 'request': batch}
+                    logger.info(f'Batch request: ({self._func.__name__}): {json.dumps(batch_request)}.')
+                    results = self._func(batch_request)
+                    logger.info(f'Batch response: ({self._func.__name__}): {json.dumps(results)}.')
                     self.process_response(keys, results)
             except Exception as e:
                 logger.warning(f'BatchRequest: {str(e)}.')
             finally:
-                elapsed = time.time() - last_req_time
-                time.sleep(max(0.2, self._every - elapsed))
+                time.sleep(0.001)
 
     def send_request(self, param: Dict) -> str:
         with self._lock:
@@ -1080,6 +1084,8 @@ class ByBitRest:
         self.retries = retries
         self.category = category
         self._session = Session()
+        self._session.mount('https://', adapters.HTTPAdapter(pool_maxsize=20))
+        self._session.mount('http://', adapters.HTTPAdapter(pool_maxsize=20))
         self._base_url = base_url
         if api_key is None:
             api_key = ''
@@ -1113,8 +1119,8 @@ class ByBitRest:
         # Why? Modify requires the symbol, but we can cache it during place_order.
         self._cache_order_id_to_symbols = {}
         self._cache_client_id_to_symbols = {}
-        self.batch_amend = BatchRequest(every=0.15, category=self.category, func=self.batch_modify_order)
-        self.batch_create = BatchRequest(every=0.15, category=self.category, func=self.batch_place_order)
+        self.batch_amend = BatchRequest(every=1, category=self.category, func=self.batch_modify_order)
+        self.batch_create = BatchRequest(every=1, category=self.category, func=self.batch_place_order)
         # for batch requests. I could not figure out why it was not working with the current bitpy implementation.
         self.http_session = HTTP(testnet=False, api_key=api_key, api_secret=api_secret)
 
@@ -1239,7 +1245,7 @@ class ByBitRest:
                 raise Exception(ret_msg)
             else:
                 raise e(ret_msg)
-        return data['result']
+        return data
 
     @staticmethod
     def _process_response(response: Response) -> Any:
