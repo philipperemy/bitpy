@@ -1089,8 +1089,8 @@ class ByBitRest:
         self.retries = retries
         self.category = category
         self._session = Session()
-        self._session.mount('https://', adapters.HTTPAdapter(pool_maxsize=20))
-        self._session.mount('http://', adapters.HTTPAdapter(pool_maxsize=20))
+        self._session.mount('https://', adapters.HTTPAdapter(pool_maxsize=40))
+        self._session.mount('http://', adapters.HTTPAdapter(pool_maxsize=40))
         self._base_url = base_url
         if api_key is None:
             api_key = ''
@@ -1480,10 +1480,13 @@ class ByBitRest:
         if batch:
             batch_key = self.batch_amend.send_request(params)
             data = self.batch_amend.check_result(batch_key, timeout=self.timeout)
-            return self._process_response_batch(data)
+            resp = self._process_response_batch(data)
+            resp['batch'] = True
         else:
             path = '/v5/order/amend'
-            return self._post(path=path, params=params, throttler=self.throttler_order_amend)
+            resp = self._post(path=path, params=params, throttler=self.throttler_order_amend)
+            resp['batch'] = False
+        return resp
 
     def _resolve_symbol_from_cache(
             self,
@@ -1548,10 +1551,12 @@ class ByBitRest:
             batch_key = self.batch_create.send_request(params)
             data = self.batch_create.check_result(batch_key, timeout=self.timeout)
             resp = self._process_response_batch(data)
+            resp['batch'] = True
         else:
             path = '/v5/order/create'
             throttle = self.throttler_order_create if use_throttle else None
             resp = self._post(path=path, params=params, throttler=throttle)
+            resp['batch'] = False
         order_id = resp.get('orderId')
         client_id = resp.get('orderLinkId')
         if order_id is not None:
